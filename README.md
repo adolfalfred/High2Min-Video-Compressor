@@ -2,6 +2,14 @@
 
 High2Min Video Compressor is a cross-platform application for producing compact, quality-checked video copies. Its ADT workflow completely removes audio from sign-language videos, targets a hard 5 MiB maximum, and can publish the results into Accessible Digital Textbook websites.
 
+## Download
+
+Download the latest Windows, Linux, Apple Silicon Mac, or Intel Mac archive from the [High2Min Releases page](https://github.com/adolfalfred/High2Min-Video-Compressor/releases/latest). A GitHub account is not required.
+
+These certificate-free binaries are built on native GitHub-hosted runners and published with SHA-256 checksums and GitHub provenance attestations. They are not Windows Authenticode-signed or Apple-notarized, so operating-system publisher warnings are expected. Read [Downloading High2Min safely](docs/download-and-verify.md) before opening a release.
+
+Maintainers can follow the [certificate-free release checklist](docs/release-checklist.md) to build and publish a new version.
+
 Version 0.8 uses the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages.
 
 The project is CLI-first: Codex, Claude Code, scripts, and CI systems can operate it without opening the desktop UI. The UI will call the same core engine.

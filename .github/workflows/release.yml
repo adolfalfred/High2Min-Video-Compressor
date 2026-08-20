@@ -1,0 +1,178 @@
+name: Build release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Match tag to project version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          version = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          tag = os.environ["RELEASE_TAG"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Tag {tag!r} does not match project version {version!r}")
+          print(f"Validated {tag}")
+          PY
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x86_64
+            runner: windows-2025
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+          - target: macos-arm64
+            runner: macos-15
+          - target: macos-x86_64
+            runner: macos-15-intel
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Linux UI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes python3-venv python3-tk xvfb libx11-6 libxft2 libxss1
+
+      - name: Install project for tests
+        run: python -m pip install --disable-pip-version-check -e .
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          & .\release\build-current.ps1
+          -Python python
+          -Output (Join-Path $env:GITHUB_WORKSPACE 'releases')
+
+      - name: Build Linux archive
+        if: runner.os == 'Linux'
+        run: xvfb-run -a env PYTHON=/usr/bin/python3 bash release/build-current.sh
+
+      - name: Build macOS archive
+        if: runner.os == 'macOS'
+        run: env PYTHON=python3 bash release/build-current.sh
+
+      - name: Verify and locate archive
+        id: artifact
+        run: >-
+          python release/ci_release_artifact.py
+          --directory releases
+          --target "${{ matrix.target }}"
+
+      - name: Attest archive provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ steps.artifact.outputs.archive }}
+
+      - name: Upload verified archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: high2min-${{ matrix.target }}
+          path: |
+            ${{ steps.artifact.outputs.archive }}
+            ${{ steps.artifact.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 7
+
+  draft-release:
+    name: Create verified draft release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Download all native archives
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify complete release set
+        id: release-set
+        run: >-
+          python release/generate_release_index.py
+          --directory dist
+
+      - name: Prepare release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cat > release-notes.md <<EOF
+          # High2Min Video Compressor ${RELEASE_TAG}
+
+          These archives were built and tested on native GitHub-hosted Windows, Linux, Apple Silicon macOS, and Intel macOS runners.
+
+          The binaries are not Authenticode- or Apple Developer ID-signed. Windows SmartScreen and macOS Gatekeeper warnings are therefore expected. Verify the matching SHA-256 file and GitHub provenance attestation before opening a downloaded archive.
+
+          Verify provenance with:
+
+          \`gh attestation verify DOWNLOADED_ARCHIVE --repo ${GITHUB_REPOSITORY}\`
+
+          Select the ZIP for Windows, the Linux TAR.GZ for Linux, or the TAR.GZ matching your Mac processor.
+          EOF
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$RELEASE_TAG"
+          dist/*
+          --draft
+          --verify-tag
+          --title "High2Min Video Compressor $RELEASE_TAG"
+          --notes-file release-notes.md

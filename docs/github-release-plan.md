@@ -1,6 +1,17 @@
 # High2Min Video Compressor: safe deployment plan
 
-This plan deliberately does not initialize a repository or publish anything. It describes the controlled path from the source folder to signed Windows, macOS, and Linux GitHub Release assets.
+This repository currently uses a certificate-free release path. GitHub builds each platform natively, verifies the archives, generates provenance attestations, and prepares a draft release. Windows Authenticode and Apple Developer ID signing are optional future improvements because those services require separate verified developer identities.
+
+## Current certificate-free plan
+
+1. CI tests Windows, Linux, Apple Silicon macOS, and Intel macOS on standard GitHub-hosted runners.
+2. Pushing a matching version tag, such as `v0.8.0`, starts `.github/workflows/release.yml`.
+3. Each runner builds and smoke-tests its own binary archive. GitHub records a provenance attestation for the archive.
+4. A final job verifies all four internal manifests and SHA-256 sidecars, creates `SHA256SUMS.txt`, and opens a draft GitHub Release.
+5. The repository owner reviews the draft and manually publishes it. Anyone can then download it without a GitHub account from the Releases page.
+6. Release notes and the download guide clearly state that Windows and macOS binaries are unsigned and explain how to verify provenance and checksums.
+
+This is the strongest practical distribution path without Windows or Apple signing identities, but it cannot remove Microsoft SmartScreen or Apple Gatekeeper publisher warnings.
 
 ## Release requirements
 
@@ -8,7 +19,7 @@ This plan deliberately does not initialize a repository or publish anything. It 
 - Keep source videos, compressed book videos, PDFs, `.venv`, local job state, and release archives out of Git history.
 - Require all unit tests, CLI contract validation, UI construction, native drag-and-drop loading, live percentage events, bundled FFmpeg, and a synthetic compression test on each native runner.
 - Reject any compressed test output that contains audio, cannot decode, exceeds 5 MiB, changes aspect ratio unexpectedly, or falls below the configured SSIM floor.
-- Sign executable code, timestamp signatures, produce SHA-256 sidecars and an SBOM, and link each binary to its exact source commit through provenance attestations.
+- Produce SHA-256 sidecars and link each binary to its exact source commit through provenance attestations. Add executable signing, timestamping, and SBOM attestations when the required identities and tooling are available.
 - Publish assets to a draft release first. Only publish after all assets, signatures, checksums, and release notes have been independently verified.
 
 ## Build and trust flow
@@ -18,10 +29,10 @@ protected source tag
         |
         v
 native test/build matrix
-  | Windows x64  -> Authenticode sign + verify
+  | Windows x64  -> native build + checksum + provenance
   | Linux x64    -> deterministic archive + verify
-  | macOS arm64  -> Developer ID sign + notarize + staple + verify
-  ` macOS Intel  -> Developer ID sign + notarize + staple + verify
+  | macOS arm64  -> native build + checksum + provenance
+  ` macOS Intel  -> native build + checksum + provenance
         |
         v
 SHA-256 + manifest + SBOM + GitHub provenance attestation
@@ -57,8 +68,8 @@ Create `.github/workflows/release.yml`, triggered only by a protected semantic t
 
 1. Confirm that the tag, package version, changelog, and release title match.
 2. Run the complete native matrix again and build each archive with the existing builders.
-3. Windows: sign `high2min.exe` and any installer with Azure Artifact Signing or an organization-owned Authenticode certificate. Prefer GitHub-to-Azure OIDC over a long-lived client secret; timestamp and verify the signature before archiving.
-4. macOS: sign all nested executables and the `.app` with Developer ID Application and hardened runtime, verify with `codesign`, submit with `notarytool`, staple the ticket, and validate with Gatekeeper before creating the final DMG/TAR.
+3. Windows: currently publish an unsigned native ZIP with a checksum and provenance attestation. If a signing identity is obtained later, sign `high2min.exe` and any installer with Azure Artifact Signing or an organization-owned Authenticode certificate before archiving.
+4. macOS: currently publish clearly labelled unsigned native archives with checksums and provenance. If an Apple Developer identity is obtained later, sign nested executables and the `.app`, submit it for notarization, staple the ticket, and validate it with Gatekeeper before packaging.
 5. Linux: verify executable permissions and archive manifest; add a Sigstore or organization GPG signature if policy requires it.
 6. Produce SHA-256 sidecars, `release-index-vVERSION.json`, CycloneDX or SPDX SBOMs, and GitHub build-provenance attestations.
 7. Upload per-platform workflow artifacts with short retention. A separate release job downloads and verifies them before creating one draft GitHub Release.
