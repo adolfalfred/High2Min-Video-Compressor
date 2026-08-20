@@ -20,7 +20,8 @@ class PathPlanningTests(unittest.TestCase):
 
             plan = build_path_plan(source, recursive=True)
 
-            self.assertEqual(plan.output_root, root / "Original Videos - Compressed")
+            expected_output_root = (root / "Original Videos - Compressed").resolve()
+            self.assertEqual(plan.output_root, expected_output_root)
             self.assertEqual(len(plan.items), 2)
             self.assertEqual(plan.items[1].output, plan.output_root / "page_1.mp4")
             self.assertEqual(plan.items[0].output, plan.output_root / "Chapter 1" / "page_2.mp4")
@@ -59,4 +60,3 @@ class PathPlanningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
