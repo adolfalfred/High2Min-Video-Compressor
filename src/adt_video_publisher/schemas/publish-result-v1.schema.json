@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tie.go.tz/schemas/adt-video/publish-result-v1.schema.json",
+  "title": "High2Min Video Compressor publication result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job_id", "ok", "exit_code", "summary", "book", "package", "items"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "job_id": {"type": "string", "minLength": 1},
+    "ok": {"const": true},
+    "exit_code": {"const": 0},
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "completed", "failed", "video_bytes"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 1},
+        "completed": {"type": "integer", "minimum": 1},
+        "failed": {"const": 0},
+        "video_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "book": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "output", "language", "bundle_version"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "output": {"type": "string", "minLength": 1},
+        "language": {"type": "string", "minLength": 1},
+        "bundle_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "package": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "checksum_path", "size_bytes", "sha256", "entry_count"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "checksum_path": {"type": "string", "minLength": 1},
+            "size_bytes": {"type": "integer", "minimum": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "entry_count": {"type": "integer", "minimum": 2}
+          }
+        }
+      ]
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "output", "status", "page_index", "mapping_key", "original_bytes", "output_bytes", "sha256"],
+        "properties": {
+          "source": {"type": "string", "minLength": 1},
+          "output": {"type": "string", "minLength": 1},
+          "status": {"const": "completed"},
+          "page_index": {"type": "integer", "minimum": 1},
+          "mapping_key": {"type": "string", "pattern": "^video-[1-9][0-9]*$"},
+          "original_bytes": {"type": "integer", "minimum": 1},
+          "output_bytes": {"type": "integer", "minimum": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    }
+  }
+}

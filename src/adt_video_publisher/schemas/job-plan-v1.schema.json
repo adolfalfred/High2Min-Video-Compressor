@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tie.go.tz/schemas/adt-video/job-plan-v1.schema.json",
+  "title": "High2Min Video Compressor job plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job_id", "source", "output", "settings", "resources", "items"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "job_id": {"type": "string", "minLength": 1},
+    "source": {"type": "string", "minLength": 1},
+    "output": {"type": "string", "minLength": 1},
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximum_bytes", "encoder", "quality_mode", "crf", "minimum_ssim", "strict_size", "adaptive_scale", "workers", "resume"],
+      "properties": {
+        "maximum_bytes": {"type": "integer", "minimum": 1048576},
+        "encoder": {"type": "string", "minLength": 1},
+        "quality_mode": {"enum": ["constant-quality", "hard-limit-adaptive"]},
+        "crf": {"type": "integer", "minimum": 0, "maximum": 51},
+        "minimum_ssim": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "strict_size": {"type": "boolean"},
+        "adaptive_scale": {"type": "boolean"},
+        "workers": {"type": "integer", "minimum": 1},
+        "resume": {"type": "boolean"}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logical_cpu_count", "available_memory_bytes", "available_disk_bytes"],
+      "properties": {
+        "logical_cpu_count": {"type": "integer", "minimum": 1},
+        "physical_cpu_count": {"type": ["integer", "null"], "minimum": 1},
+        "available_memory_bytes": {"type": "integer", "minimum": 0},
+        "available_disk_bytes": {"type": "integer", "minimum": 0},
+        "hardware_encoders": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "output", "status"],
+        "properties": {
+          "source": {"type": "string", "minLength": 1},
+          "output": {"type": "string", "minLength": 1},
+          "status": {"enum": ["pending", "skipped", "ready"]}
+        }
+      }
+    }
+  }
+}

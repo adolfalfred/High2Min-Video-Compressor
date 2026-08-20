@@ -1,0 +1,28 @@
+# Local Python/build state
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Local editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Generated release binaries belong in GitHub Releases, not Git history
+releases/*
+!releases/README.md
+!releases/release-index-v*.json
+
+# Generated compression/publishing outputs and durable local jobs
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+.adt-video-job.json
+compression-report.json
+compression-report.csv

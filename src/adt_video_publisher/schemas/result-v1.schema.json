@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tie.go.tz/schemas/adt-video/result-v1.schema.json",
+  "title": "High2Min Video Compressor job result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job_id", "ok", "exit_code", "summary", "items"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "job_id": {"type": "string", "minLength": 1},
+    "ok": {"type": "boolean"},
+    "exit_code": {"type": "integer", "minimum": 0, "maximum": 255},
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "completed", "skipped", "failed", "original_bytes", "output_bytes"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "completed": {"type": "integer", "minimum": 0},
+        "skipped": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "original_bytes": {"type": "integer", "minimum": 0},
+        "output_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "output", "status", "original_bytes", "output_bytes", "quality_score", "target_exceeded", "error"],
+        "properties": {
+          "source": {"type": "string", "minLength": 1},
+          "output": {"type": "string", "minLength": 1},
+          "status": {"enum": ["completed", "skipped", "failed"]},
+          "original_bytes": {"type": "integer", "minimum": 0},
+          "output_bytes": {"type": "integer", "minimum": 0},
+          "quality_score": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+          "target_exceeded": {"type": "boolean"},
+          "error": {"type": ["object", "null"]}
+        }
+      }
+    }
+  }
+}

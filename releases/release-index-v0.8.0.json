@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0",
+  "product": "High2Min Video Compressor",
+  "version": "0.8.0",
+  "features": ["native file/folder drag-and-drop", "live encoding percentage", "overall percentage"],
+  "quality_profile": {
+    "encoder": "libx264",
+    "crf": 35,
+    "preset": "medium",
+    "minimum_ssim": 0.95,
+    "maximum_bytes": 5242880,
+    "size_target_policy": "hard-adaptive",
+    "audio_removed": true
+  },
+  "artifacts": [
+    {
+      "target": "windows-x86_64",
+      "archive": "High2Min-Video-Compressor-0.8.0-windows-x86_64.zip",
+      "size_bytes": 44430105,
+      "sha256": "2db742de7118c51d1ddd30fba8d4be20b55155482a00fe5817037762a152a1fa",
+      "native_execution_verified": true,
+      "real_quality_compression_verified": true,
+      "ui_smoke_verified": true
+    },
+    {
+      "target": "linux-x86_64",
+      "archive": "High2Min-Video-Compressor-0.8.0-linux-x86_64.tar.gz",
+      "size_bytes": 43510552,
+      "sha256": "1886397ccfa3bdbf7b78d5913cb9d5a7b9cde9c9ed9feb0986ceb241e5fc85c6",
+      "native_execution_verified": true,
+      "real_quality_compression_verified": true,
+      "ui_smoke_verified": true
+    },
+    {
+      "target": "macos-arm64",
+      "archive": "High2Min-Video-Compressor-0.8.0-macos-arm64.tar.gz",
+      "size_bytes": 47131965,
+      "sha256": "11aa9158df54186c13a01c492dbed64908a2b01ced35049b1340bda118091b48",
+      "native_execution_verified": false,
+      "ui_smoke_verified": false,
+      "structural_verification": ["TkDND Mach-O library", "upstream SHA-256", "Tk resources", "release manifest", "archive entry hashes"]
+    },
+    {
+      "target": "macos-x86_64",
+      "archive": "High2Min-Video-Compressor-0.8.0-macos-x86_64.tar.gz",
+      "size_bytes": 50728067,
+      "sha256": "0dbc523c6b6255a7c9ac982e3522c63f5776844a0e7a5dc9187386eb7e6d1ade",
+      "native_execution_verified": false,
+      "ui_smoke_verified": false,
+      "structural_verification": ["TkDND Mach-O library", "upstream SHA-256", "Tk resources", "release manifest", "archive entry hashes"]
+    }
+  ]
+}

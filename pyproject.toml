@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "high2min-video-compressor"
+version = "0.8.0"
+description = "Cross-platform, agent-friendly video compressor with silent sign-language video and ADT publishing workflows."
+requires-python = ">=3.11"
+dependencies = ["tkinterdnd2==0.6.2"]
+
+[project.scripts]
+high2min = "adt_video_publisher.cli:run"
+high2min-ui = "adt_video_publisher.desktop:run"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+adt_video_publisher = ["schemas/*.json", "assets/*.png", "assets/*.ico", "assets/*.icns", "assets/*.svg"]
+
+[tool.unittest]
+start-directory = "tests"

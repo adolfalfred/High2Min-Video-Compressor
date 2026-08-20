@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tie.go.tz/schemas/adt-video/progress-event-v1.schema.json",
+  "title": "High2Min Video Compressor progress event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job_id", "sequence", "timestamp", "event", "payload"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "job_id": {"type": "string", "minLength": 1},
+    "sequence": {"type": "integer", "minimum": 0},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "event": {
+      "enum": [
+        "job_planned",
+        "job_started",
+        "item_started",
+        "item_progress",
+        "item_completed",
+        "item_failed",
+        "resource_throttled",
+        "job_completed",
+        "job_interrupted"
+      ]
+    },
+    "payload": {"type": "object"}
+  }
+}
