@@ -6,10 +6,11 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
-from adt_video_publisher.errors import InvalidInputError, PublishFailedError
+from adt_video_publisher.errors import InvalidInputError, PublishFailedError, ResourceLimitError
 from adt_video_publisher.publishing import (
     ADLCP_NAMESPACE,
     IMS_NAMESPACE,
@@ -120,6 +121,64 @@ def read_offline_inline(preloader: Path) -> dict[str, object]:
 
 
 class PublishingTests(unittest.TestCase):
+    def test_publish_low_disk_error_uses_megabytes_without_changing_book(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"compressed-one")
+            before = hash_tree(book)
+
+            with patch(
+                "adt_video_publisher.publishing.shutil.disk_usage",
+                return_value=SimpleNamespace(free=1024),
+            ):
+                with self.assertRaises(ResourceLimitError) as raised:
+                    publish_adt(
+                        videos,
+                        book=book,
+                        in_place=True,
+                        validate_media=False,
+                    )
+
+            message = str(raised.exception)
+            self.assertIn("MB", message)
+            self.assertNotIn("bytes", message)
+            self.assertEqual(hash_tree(book), before)
+
+    def test_publish_recovers_essential_files_omitted_from_legacy_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            manifest_path = book / "imsmanifest.xml"
+            tree = ET.parse(manifest_path)
+            manifest_root = tree.getroot()
+            omitted = {"assets/base.bundle.local.js", "content/pages.json"}
+            for element in list(manifest_root.iter(f"{{{IMS_NAMESPACE}}}file")):
+                if element.get("href") in omitted:
+                    parent = next(
+                        candidate
+                        for candidate in manifest_root.iter()
+                        if element in list(candidate)
+                    )
+                    parent.remove(element)
+            tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
+            self.assertTrue(omitted.isdisjoint(declared_manifest_files(manifest_path)))
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"compressed-one")
+
+            publish_adt(
+                videos,
+                book=book,
+                in_place=True,
+                validate_media=False,
+            )
+
+            self.assertTrue((book / "assets" / "base.bundle.local.js").is_file())
+            self.assertTrue(omitted.issubset(declared_manifest_files(manifest_path)))
+
     def test_publish_refreshes_offline_preloader_settings_mappings_and_cache_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

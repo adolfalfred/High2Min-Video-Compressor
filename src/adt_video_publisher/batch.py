@@ -110,6 +110,7 @@ class BatchRunResult:
     state_path: Path
     json_report_path: Path
     csv_report_path: Path
+    job_details_removed: bool
 
     def to_result_document(self) -> dict[str, object]:
         return {
@@ -131,6 +132,7 @@ class BatchRunResult:
                 "state_path": str(self.state_path),
                 "json_report_path": str(self.json_report_path),
                 "csv_report_path": str(self.csv_report_path),
+                "job_details_removed": self.job_details_removed,
             }
         )
         return document
@@ -792,17 +794,28 @@ def run_batch(
         state_path=state_file,
         json_report_path=json_report,
         csv_report_path=csv_report,
+        job_details_removed=(
+            summary.failed > 0
+            and summary.completed == 0
+            and summary.skipped == 0
+            and summary.output_bytes == 0
+        ),
     )
-    _atomic_write_json(json_report, result.to_result_document())
-    _atomic_write_text(csv_report, _csv_report(ordered_items))
+    if result.job_details_removed:
+        for details_path in (state_file, json_report, csv_report):
+            details_path.unlink(missing_ok=True)
+    else:
+        _atomic_write_json(json_report, result.to_result_document())
+        _atomic_write_text(csv_report, _csv_report(ordered_items))
     notify(
         "job_interrupted" if interrupted else "job_completed",
         {
             "ok": result.ok,
             "exit_code": result.exit_code,
             "summary": result.summary.to_dict(),
-            "json_report": str(json_report),
-            "csv_report": str(csv_report),
+            "job_details_removed": result.job_details_removed,
+            "json_report": None if result.job_details_removed else str(json_report),
+            "csv_report": None if result.job_details_removed else str(csv_report),
         },
     )
     return result

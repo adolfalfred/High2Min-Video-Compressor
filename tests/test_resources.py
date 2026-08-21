@@ -36,8 +36,11 @@ class ResourcePlanningTests(unittest.TestCase):
             select_worker_plan(snapshot(available_memory=300 * 1024**2), item_count=3)
 
     def test_low_disk_is_rejected_before_processing(self) -> None:
-        with self.assertRaises(ResourceLimitError):
+        with self.assertRaises(ResourceLimitError) as raised:
             select_worker_plan(snapshot(available_disk=1024), item_count=3)
+        self.assertIn("MB required", str(raised.exception))
+        self.assertIn("MB available", str(raised.exception))
+        self.assertNotIn("bytes required", str(raised.exception))
 
 
 if __name__ == "__main__":

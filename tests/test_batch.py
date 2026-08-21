@@ -154,6 +154,32 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(state["status"], "completed")
             self.assertTrue(all(item["status"] == "completed" for item in state["items"]))
 
+    def test_all_failed_without_output_removes_temporary_job_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.create_sources(root, 2)
+            output = root / "compressed"
+
+            def failing_compressor(*_args: object, **_kwargs: object) -> CompressionResult:
+                raise RuntimeError("controlled failure before output")
+
+            result = run_batch(
+                source,
+                output=output,
+                requested_workers=1,
+                resource_snapshot=resources(),
+                compression_function=failing_compressor,
+            )
+
+            self.assertEqual(result.summary.completed, 0)
+            self.assertEqual(result.summary.skipped, 0)
+            self.assertEqual(result.summary.failed, 2)
+            self.assertTrue(result.job_details_removed)
+            self.assertFalse(result.state_path.exists())
+            self.assertFalse(result.json_report_path.exists())
+            self.assertFalse(result.csv_report_path.exists())
+            self.assertEqual(list(output.glob("*.tmp")), [])
+
     def test_pre_cancelled_batch_keeps_items_pending_and_reports_interruption(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

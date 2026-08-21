@@ -25,6 +25,7 @@ from .errors import (
 )
 from .media import probe_media
 from .planning import DEFAULT_MAXIMUM_BYTES
+from .resources import format_megabytes
 
 ProgressCallback = Callable[[str, str, dict[str, object]], None]
 PAGE_VIDEO_PATTERN: Final = re.compile(r"^page_([1-9][0-9]*)\.mp4$", re.IGNORECASE)
@@ -38,6 +39,12 @@ STORED_SUFFIXES: Final = {
 }
 RUNTIME_BUNDLE_PATTERN: Final = "base.bundle*.js"
 OFFLINE_PRELOADER_RELATIVE: Final = Path("assets") / "offline-preloader.js"
+ESSENTIAL_SITE_RELATIVES: Final = (
+    Path("index.html"),
+    Path("assets") / "config.json",
+    Path("content") / "pages.json",
+    OFFLINE_PRELOADER_RELATIVE,
+)
 OFFLINE_INLINE_MARKER: Final = "var INLINE = "
 OFFLINE_INLINE_END_MARKER: Final = ";\n  var BASE_DIR"
 RUNTIME_SCRIPT_PATTERN: Final = re.compile(
@@ -363,6 +370,26 @@ def _copy_manifest_site(source: Path, stage: Path, *, skip_prefix: str) -> None:
         if not source_file.is_file():
             raise PublishFailedError(f"Manifest declares a missing source file: '{relative}'.")
         destination = stage / Path(*PurePosixPath(relative).parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_file, destination)
+    for relative in ESSENTIAL_SITE_RELATIVES:
+        source_file = source / relative
+        if not source_file.is_file():
+            continue
+        destination = stage / relative
+        if destination.is_file():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_file, destination)
+    for source_file in sorted(
+        (source / "assets").glob(RUNTIME_BUNDLE_PATTERN),
+        key=lambda path: path.name.casefold(),
+    ):
+        if not source_file.is_file():
+            continue
+        destination = stage / "assets" / source_file.name
+        if destination.is_file():
+            continue
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_file, destination)
     shutil.copy2(source / "imsmanifest.xml", stage / "imsmanifest.xml")
@@ -828,7 +855,8 @@ def publish_adt(
     available = shutil.disk_usage(output_book.parent).free
     if available < required_bytes:
         raise ResourceLimitError(
-            f"Publishing needs about {required_bytes} bytes but only {available} bytes are free."
+            f"Publishing needs about {format_megabytes(required_bytes)}, but only "
+            f"{format_megabytes(available)} is free."
         )
 
     if progress_callback:

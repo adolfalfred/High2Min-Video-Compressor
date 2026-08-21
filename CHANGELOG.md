@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.4 - 2026-08-21
+
+- Recover valid ADT runtime bundles omitted from older `imsmanifest.xml` files.
+- Show insufficient-storage requirements and availability in MB instead of raw bytes.
+- Remove state and report files when every compression item fails before producing output.
+- Explain zero-output cleanup consistently in the desktop UI and CLI.
+
 ## 0.8.3 - 2026-08-21
 
 - Synchronize generated offline-preloader settings and video mappings during ADT publishing.

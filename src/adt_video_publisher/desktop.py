@@ -681,12 +681,21 @@ def create_application(root: Any, controller: DesktopController | None = None) -
                 )
                 self.current_progress_var.set(100 if summary.completed else 0)
                 self.current_progress_text_var.set("Compression job finished")
-                self.status_var.set(
-                    f"Finished: {summary.completed} completed, {summary.skipped} skipped, "
-                    f"{summary.failed} failed. Reports are in {value.json_report_path.parent}."
-                )
-                self._append_log(f"JSON report: {value.json_report_path}")
-                self._append_log(f"CSV report: {value.csv_report_path}")
+                if value.job_details_removed:
+                    self.status_var.set(
+                        f"Failed: no videos were completed. {summary.failed} failed; "
+                        "temporary job details were removed."
+                    )
+                    self._append_log(
+                        "No output was produced; temporary job details were removed."
+                    )
+                else:
+                    self.status_var.set(
+                        f"Finished: {summary.completed} completed, {summary.skipped} skipped, "
+                        f"{summary.failed} failed. Reports are in {value.json_report_path.parent}."
+                    )
+                    self._append_log(f"JSON report: {value.json_report_path}")
+                    self._append_log(f"CSV report: {value.csv_report_path}")
             elif isinstance(value, PublishResult):
                 self.progress_var.set(100)
                 self.overall_progress_text_var.set("Overall progress: 100%")

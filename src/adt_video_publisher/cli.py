@@ -431,11 +431,17 @@ def _verify(options: argparse.Namespace, progress: ProgressEmitter) -> tuple[int
 
 def _batch_result(result: BatchRunResult) -> tuple[int, dict[str, object], str]:
     summary = result.summary
-    human = (
-        f"Completed {summary.completed}, skipped {summary.skipped}, failed {summary.failed} "
-        f"of {summary.total} video(s). Reports: '{result.json_report_path}', "
-        f"'{result.csv_report_path}'.\n"
-    )
+    if getattr(result, "job_details_removed", False):
+        human = (
+            f"Completed 0, skipped 0, failed {summary.failed} of {summary.total} video(s). "
+            "No output was produced, so temporary job details were removed.\n"
+        )
+    else:
+        human = (
+            f"Completed {summary.completed}, skipped {summary.skipped}, failed {summary.failed} "
+            f"of {summary.total} video(s). Reports: '{result.json_report_path}', "
+            f"'{result.csv_report_path}'.\n"
+        )
     return result.exit_code, result.to_result_document(), human
 
 

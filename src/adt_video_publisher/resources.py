@@ -14,6 +14,14 @@ from pathlib import Path
 
 from .errors import InvalidInputError, ResourceLimitError
 from .planning import DEFAULT_MAXIMUM_BYTES
+
+MEGABYTE_BYTES = 1024 * 1024
+
+
+def format_megabytes(byte_count: int) -> str:
+    """Format a byte count as readable megabytes for user-facing resource errors."""
+
+    return f"{max(0, byte_count) / MEGABYTE_BYTES:,.2f} MB"
 from .processes import hidden_process_options
 
 MIB = 1024 * 1024
@@ -344,8 +352,8 @@ def select_worker_plan(
     required_disk = math_ceil_ratio(maximum_bytes * (item_count + workers), 0.10)
     if snapshot.available_disk_bytes < required_disk:
         raise ResourceLimitError(
-            f"Insufficient output disk space: {required_disk} bytes required, "
-            f"{snapshot.available_disk_bytes} bytes available."
+            f"Insufficient output disk space: {format_megabytes(required_disk)} required, "
+            f"{format_megabytes(snapshot.available_disk_bytes)} available."
         )
     return WorkerPlan(
         requested_workers=requested_workers,

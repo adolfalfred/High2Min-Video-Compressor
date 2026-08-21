@@ -18,8 +18,8 @@
 ## Build a draft release
 
 ```sh
-git tag -a v0.8.3 -m "High2Min Video Compressor 0.8.3"
-git push origin v0.8.3
+git tag -a v0.8.4 -m "High2Min Video Compressor 0.8.4"
+git push origin v0.8.4
 ```
 
 - [ ] Open **Actions → Build release** and wait for all native build jobs and the draft-release job to succeed.
@@ -27,12 +27,14 @@ git push origin v0.8.3
 - [ ] Confirm it contains four archives, four `.sha256` sidecars, `SHA256SUMS.txt`, and a release index.
 - [ ] Download at least the Windows archive and verify its checksum and provenance.
 - [ ] Confirm the Windows application opens and performs a small compression test.
-- [ ] Confirm `High2Min Video Compressor.exe` opens without a terminal and `high2min.exe --version` prints `0.8.3` in PowerShell.
+- [ ] Confirm `High2Min Video Compressor.exe` opens without a terminal and `high2min.exe --version` prints `0.8.4` in PowerShell.
 - [ ] Confirm compression shows no FFmpeg/FFprobe console popups on Windows.
 - [ ] Confirm desktop Publish ADT updates the chosen repo itself and leaves existing ZIP files unchanged.
 - [ ] Confirm the published ADT shows the hand-sign control after a fresh browser reload.
 - [ ] Confirm voice-over can play while the sign-language video's playback time continues advancing.
 - [ ] Confirm an ADT with `assets/offline-preloader.js` receives refreshed embedded config, video mappings, HTML, and versioned script URLs.
+- [ ] Confirm publishing succeeds when a valid `base.bundle*.js` exists but the legacy manifest omits it.
+- [ ] Confirm insufficient disk errors use MB and zero-output failed jobs leave no state/report files.
 - [ ] Confirm both macOS archives contain the native `.app`, pass strict nested code-integrity validation, and match their labelled processor architecture.
 - [ ] If possible, ask trusted users with Apple Silicon, Intel Mac, and Linux machines to test the draft archives before publication.
 
@@ -51,4 +53,4 @@ git push origin v0.8.3
 - The archive contains audio, exceeds the intended video limit, or the UI does not open.
 - The release page does not clearly state that Windows and macOS builds are unsigned.
 
-If a problem is found, delete or retain the faulty draft for diagnosis, correct the source, increment the project version, and create a new patch tag such as `v0.8.3`. Do not reuse a release tag or silently replace a published asset.
+If a problem is found, delete or retain the faulty draft for diagnosis, correct the source, increment the project version, and create a new patch tag such as `v0.8.5`. Do not reuse a release tag or silently replace a published asset.
