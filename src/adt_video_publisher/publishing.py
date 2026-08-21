@@ -36,6 +36,18 @@ STORED_SUFFIXES: Final = {
     ".aac", ".avi", ".gif", ".gz", ".jpeg", ".jpg", ".m4a", ".m4v", ".mov",
     ".mp3", ".mp4", ".ogg", ".pdf", ".png", ".webm", ".webp", ".woff", ".woff2", ".zip",
 }
+RUNTIME_BUNDLE_PATTERN: Final = "base.bundle*.js"
+VIDEO_PAUSES_FOR_AUDIO_PATTERN: Final = re.compile(
+    r'[$A-Za-z_][$\w]*\s*===\s*"tts"\s*&&\s*[$A-Za-z_][$\w]*\.current\?\.pause\(\)'
+)
+VIDEO_CLAIMS_EXCLUSIVE_AUDIO_PATTERN: Final = re.compile(
+    r'onPlay\s*:\s*\(\)\s*=>\s*[$A-Za-z_][$\w]*\("sign-language"\)'
+)
+AUDIO_PAUSES_FOR_VIDEO_PATTERN: Final = re.compile(
+    r'[$A-Za-z_][$\w]*\s*===\s*"sign-language"\s*&&\s*\('
+    r'[$A-Za-z_][$\w]*\(\)\s*,\s*[$A-Za-z_][$\w]*\(!1\)\s*,\s*'
+    r'[$A-Za-z_][$\w]*\(0\)\s*,\s*[$A-Za-z_][$\w]*\(!1\)\s*\)'
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,8 +370,55 @@ def _update_manifest(book: Path) -> tuple[str, ...]:
     return tuple(files)
 
 
+def _enable_parallel_accessibility_media(book: Path) -> tuple[Path, ...]:
+    """Keep the hand control available while allowing narration and video together."""
+
+    assets = book / "assets"
+    candidates = tuple(sorted(assets.glob(RUNTIME_BUNDLE_PATTERN), key=lambda path: path.name.casefold()))
+    supported: list[Path] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise PublishFailedError(f"ADT runtime bundle is unreadable: '{path}'.") from exc
+        if (
+            "sign-language-label" not in source
+            or "signLanguage" not in source
+            or "activate-tts-label" not in source
+            or "readAloud" not in source
+        ):
+            raise PublishFailedError(
+                f"ADT runtime bundle '{path.name}' has no supported hand-sign and voice-over controls."
+            )
+        updated = VIDEO_PAUSES_FOR_AUDIO_PATTERN.sub("!1", source)
+        updated = VIDEO_CLAIMS_EXCLUSIVE_AUDIO_PATTERN.sub("onPlay:()=>{}", updated)
+        updated = AUDIO_PAUSES_FOR_VIDEO_PATTERN.sub("!1", updated)
+        if (
+            VIDEO_PAUSES_FOR_AUDIO_PATTERN.search(updated)
+            or VIDEO_CLAIMS_EXCLUSIVE_AUDIO_PATTERN.search(updated)
+            or AUDIO_PAUSES_FOR_VIDEO_PATTERN.search(updated)
+        ):
+            raise PublishFailedError(
+                f"Could not make narration and sign-language video independent in '{path.name}'."
+            )
+        if updated != source:
+            path.write_text(updated, encoding="utf-8")
+        supported.append(path.relative_to(book))
+    if not supported:
+        raise PublishFailedError(
+            "The ADT runtime has no supported sign-language hand control. "
+            "Publishing stopped before changing the website."
+        )
+    return tuple(supported)
+
+
 def validate_adt_website(
-    book: str | os.PathLike[str], *, language: str | None = None
+    book: str | os.PathLike[str],
+    *,
+    language: str | None = None,
+    allow_unmanifested: bool = False,
 ) -> dict[str, object]:
     """Validate manifest completeness, page files, config, and video mappings."""
 
@@ -371,8 +430,12 @@ def validate_adt_website(
     page_count = _page_count(root)
     config, selected_language = _book_configuration(root, language)
     features = config.get("features")
-    if not isinstance(features, dict) or features.get("signLanguage") is not True:
-        raise PublishFailedError("The published config does not enable sign language.")
+    if (
+        not isinstance(features, dict)
+        or features.get("signLanguage") is not True
+        or features.get("readAloud") is not True
+    ):
+        raise PublishFailedError("The published config does not enable sign language and voice-over.")
     videos_path = root / "content" / "i18n" / selected_language / "videos.json"
     mappings = _read_json(videos_path, f"{selected_language}/videos.json")
     if not isinstance(mappings, dict):
@@ -399,14 +462,20 @@ def validate_adt_website(
     if actual_videos != mapped_files:
         raise PublishFailedError("The published video directory and videos.json do not match exactly.")
     declared = declared_manifest_files(root / "imsmanifest.xml")
-    actual = {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() and path != root / "imsmanifest.xml"
-    }
-    if set(declared) != actual:
-        missing = sorted(set(declared) - actual)
+    missing = sorted(
+        relative
+        for relative in declared
+        if not (root / Path(*PurePosixPath(relative).parts)).is_file()
+    )
+    extra: list[str] = []
+    if not allow_unmanifested:
+        actual = {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file() and path != root / "imsmanifest.xml"
+        }
         extra = sorted(actual - set(declared))
+    if missing or (extra and not allow_unmanifested):
         raise PublishFailedError(
             f"Manifest/site mismatch: {len(missing)} missing and {len(extra)} undeclared file(s)."
         )
@@ -497,12 +566,85 @@ def _commit_file_no_clobber(temporary: Path, final: Path) -> None:
     temporary.unlink()
 
 
+def _commit_in_place(
+    stage: Path,
+    book: Path,
+    language: str,
+    runtime_relatives: tuple[Path, ...],
+) -> None:
+    """Replace only generated ADT assets, restoring the originals on any failure."""
+
+    backup = book.parent / f".{book.name}.adt-publish-{uuid.uuid4().hex}.backup"
+    video_relative = Path("content") / "i18n" / language / "video"
+    file_relatives = (
+        Path("assets") / "config.json",
+        Path("content") / "i18n" / language / "videos.json",
+        *runtime_relatives,
+        Path("imsmanifest.xml"),
+    )
+    target_video = book / video_relative
+    staged_video = stage / video_relative
+    backup_video = backup / video_relative
+    changed = False
+    try:
+        backup.mkdir()
+        if target_video.exists():
+            shutil.copytree(target_video, backup_video)
+        for relative in file_relatives:
+            target = book / relative
+            if target.is_file():
+                saved = backup / relative
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, saved)
+
+        changed = True
+        if target_video.exists():
+            shutil.rmtree(target_video)
+        target_video.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(staged_video), str(target_video))
+        for relative in file_relatives:
+            staged = stage / relative
+            target = book / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged, target)
+
+        validate_adt_website(book, language=language, allow_unmanifested=True)
+    except Exception:
+        if changed:
+            try:
+                if target_video.exists():
+                    shutil.rmtree(target_video)
+                if backup_video.exists():
+                    target_video.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(backup_video), str(target_video))
+                for relative in file_relatives:
+                    target = book / relative
+                    saved = backup / relative
+                    if saved.is_file():
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(saved, target)
+                    elif target.exists():
+                        target.unlink()
+            except Exception as recovery_error:
+                raise PublishFailedError(
+                    f"Publishing failed and automatic recovery was incomplete. "
+                    f"Original files remain in '{backup}'."
+                ) from recovery_error
+        if backup.exists():
+            _remove_generated_directory(backup, book.parent)
+        raise
+    else:
+        if backup.exists():
+            _remove_generated_directory(backup, book.parent)
+
+
 def publish_adt(
     videos: str | os.PathLike[str],
     *,
     book: str | os.PathLike[str],
-    output: str | os.PathLike[str],
+    output: str | os.PathLike[str] | None = None,
     package: str | os.PathLike[str] | None = None,
+    in_place: bool = False,
     language: str | None = None,
     recursive: bool = False,
     maximum_bytes: int = DEFAULT_MAXIMUM_BYTES,
@@ -510,20 +652,30 @@ def publish_adt(
     validate_media: bool = True,
     progress_callback: ProgressCallback | None = None,
 ) -> PublishResult:
-    """Publish compressed videos into a new ADT copy and optionally build a deployment ZIP."""
+    """Publish videos into a new copy, or transactionally update an ADT website in place."""
 
     job_id = uuid.uuid4().hex
     source_book = _resolve_directory(book, "Source ADT website")
     video_root = _resolve_directory(videos, "Compressed video")
-    output_book = Path(output).expanduser().resolve(strict=False)
+    if in_place:
+        if output is not None:
+            raise InvalidInputError("In-place publishing does not accept a separate output directory.")
+        if package is not None:
+            raise InvalidInputError("In-place publishing does not create or modify deployment ZIP packages.")
+        output_book = source_book
+    else:
+        if output is None:
+            raise InvalidInputError("A published website output is required unless in-place mode is enabled.")
+        output_book = Path(output).expanduser().resolve(strict=False)
     package_path = Path(package).expanduser().resolve(strict=False) if package else None
     checksum_path = Path(str(package_path) + ".sha256") if package_path else None
-    if output_book.exists():
-        raise UnsafePathError(f"Published website output already exists: '{output_book}'.")
-    if _same_path(output_book, source_book) or _is_within(output_book, source_book) or _is_within(source_book, output_book):
-        raise UnsafePathError("Published website output must be separate from the source ADT website.")
-    if _same_path(output_book, video_root) or _is_within(output_book, video_root) or _is_within(video_root, output_book):
-        raise UnsafePathError("Published website output must be separate from the compressed videos.")
+    if not in_place:
+        if output_book.exists():
+            raise UnsafePathError(f"Published website output already exists: '{output_book}'.")
+        if _same_path(output_book, source_book) or _is_within(output_book, source_book) or _is_within(source_book, output_book):
+            raise UnsafePathError("Published website output must be separate from the source ADT website.")
+        if _same_path(output_book, video_root) or _is_within(output_book, video_root) or _is_within(video_root, output_book):
+            raise UnsafePathError("Published website output must be separate from the compressed videos.")
     if package_path:
         if package_path.suffix.lower() != ".zip":
             raise InvalidInputError("Deployment package must use the .zip extension.")
@@ -531,12 +683,23 @@ def publish_adt(
             raise UnsafePathError("Deployment package or checksum output already exists.")
         if _is_within(package_path, source_book) or _is_within(package_path, video_root) or _is_within(package_path, output_book):
             raise UnsafePathError("Deployment package must be outside source, video, and published website folders.")
-    output_book.parent.mkdir(parents=True, exist_ok=True)
+    if not in_place:
+        output_book.parent.mkdir(parents=True, exist_ok=True)
     if package_path:
         package_path.parent.mkdir(parents=True, exist_ok=True)
 
     page_count = _page_count(source_book)
     config, selected_language = _book_configuration(source_book, language)
+    if in_place:
+        target_video_root = source_book / "content" / "i18n" / selected_language / "video"
+        if (
+            _same_path(video_root, target_video_root)
+            or _is_within(video_root, target_video_root)
+            or _is_within(target_video_root, video_root)
+        ):
+            raise UnsafePathError(
+                "The compressed-video input must be separate from the ADT video directory being replaced."
+            )
     items = discover_page_videos(video_root, page_count=page_count, recursive=recursive)
     total_video_bytes = sum(item.size_bytes for item in items)
     source_declared = declared_manifest_files(source_book / "imsmanifest.xml")
@@ -606,9 +769,11 @@ def publish_adt(
         if not isinstance(features, dict):
             raise PublishFailedError("config.json features must contain an object.")
         features["signLanguage"] = True
+        features["readAloud"] = True
         incremented, bundle_version = _increment_bundle_version(config.get("bundleVersion"))
         staged_config["bundleVersion"] = incremented
         _write_json(staged_config_path, staged_config)
+        runtime_relatives = _enable_parallel_accessibility_media(stage)
         _update_manifest(stage)
         validation = validate_adt_website(stage, language=selected_language)
         if validation["video_count"] != len(items):
@@ -626,8 +791,12 @@ def publish_adt(
                 entry_count=entry_count,
             )
 
-        stage.replace(output_book)
-        committed_output = True
+        if in_place:
+            _commit_in_place(stage, source_book, selected_language, runtime_relatives)
+            _remove_generated_directory(stage, output_book.parent)
+        else:
+            stage.replace(output_book)
+            committed_output = True
         if package_path and package_temporary and checksum_path and checksum_temporary:
             _commit_file_no_clobber(package_temporary, package_path)
             committed_package = True

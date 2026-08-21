@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .errors import InvalidInputError, ResourceLimitError
 from .planning import DEFAULT_MAXIMUM_BYTES
+from .processes import hidden_process_options
 
 MIB = 1024 * 1024
 MINIMUM_MEMORY_PER_WORKER = 512 * MIB
@@ -110,6 +111,7 @@ def _macos_memory() -> tuple[int, int]:
                 text=True,
                 timeout=5,
                 check=True,
+                **hidden_process_options(),
             ).stdout.strip()
         )
         page_size = int(
@@ -119,10 +121,16 @@ def _macos_memory() -> tuple[int, int]:
                 text=True,
                 timeout=5,
                 check=True,
+                **hidden_process_options(),
             ).stdout.strip()
         )
         vm_output = subprocess.run(
-            ["vm_stat"], capture_output=True, text=True, timeout=5, check=True
+            ["vm_stat"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+            **hidden_process_options(),
         ).stdout
         available_pages = 0
         for label in ("Pages free", "Pages inactive", "Pages speculative"):
@@ -202,6 +210,7 @@ def _physical_cores() -> int | None:
                     text=True,
                     timeout=5,
                     check=True,
+                    **hidden_process_options(),
                 ).stdout.strip()
             )
         except (OSError, ValueError, subprocess.SubprocessError):
@@ -234,6 +243,7 @@ def detect_hardware_encoders(ffmpeg_path: str | os.PathLike[str] | None) -> tupl
             errors="replace",
             timeout=10,
             check=False,
+            **hidden_process_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return ()
@@ -267,6 +277,7 @@ def detect_hardware_encoders(ffmpeg_path: str | os.PathLike[str] | None) -> tupl
                 capture_output=True,
                 timeout=4,
                 check=False,
+                **hidden_process_options(),
             )
         except (OSError, subprocess.SubprocessError):
             continue

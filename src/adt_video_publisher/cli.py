@@ -199,11 +199,17 @@ def _build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--probe", help="Explicit FFprobe or FFmpeg executable path.")
 
     publish_parser = subparsers.add_parser(
-        "publish", help="Publish compressed videos into a new ADT copy and deployment ZIP."
+        "publish", help="Publish compressed videos into an ADT website."
     )
     publish_parser.add_argument("--input", required=True, help="Directory of compressed page_N.mp4 videos.")
-    publish_parser.add_argument("--book", required=True, help="Source ADT website directory (never modified).")
-    publish_parser.add_argument("--output", required=True, help="New directory for the published ADT website copy.")
+    publish_parser.add_argument("--book", required=True, help="Source ADT website directory.")
+    publish_destination = publish_parser.add_mutually_exclusive_group(required=True)
+    publish_destination.add_argument("--output", help="New directory for a published ADT website copy.")
+    publish_destination.add_argument(
+        "--in-place",
+        action="store_true",
+        help="Update the selected ADT website itself; no ZIP package is created or modified.",
+    )
     publish_parser.add_argument("--package", help="Optional deployment ZIP output; a .sha256 file is also created.")
     publish_parser.add_argument("--language", help="ADT language code; defaults to config.json.")
     publish_parser.add_argument("--recursive", action="store_true", help="Find page videos in nested folders.")
@@ -485,6 +491,7 @@ def _publish(options: argparse.Namespace, progress: ProgressEmitter) -> tuple[in
             book=options.book,
             output=options.output,
             package=options.package,
+            in_place=options.in_place,
             language=options.language,
             recursive=options.recursive,
             maximum_bytes=options.maximum_bytes,

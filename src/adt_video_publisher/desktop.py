@@ -88,8 +88,6 @@ def create_application(root: Any, controller: DesktopController | None = None) -
             self.recursive_var = tk.BooleanVar(value=False)
             self.ffmpeg_var = tk.StringVar()
             self.book_var = tk.StringVar()
-            self.published_book_var = tk.StringVar()
-            self.package_var = tk.StringVar()
             self.language_var = tk.StringVar()
             self.status_var = tk.StringVar(value="Choose a video file or folder to begin.")
             self.analysis_var = tk.StringVar(value="System has not been analyzed yet.")
@@ -262,7 +260,7 @@ def create_application(root: Any, controller: DesktopController | None = None) -
             publishing = ttk.LabelFrame(publish_tab, text="Publish compressed videos", padding=12)
             publishing.grid(row=0, column=0, sticky="ew")
             publishing.columnconfigure(1, weight=1)
-            ttk.Label(publishing, text="Source ADT website:").grid(row=0, column=0, sticky="w")
+            ttk.Label(publishing, text="ADT website to update:").grid(row=0, column=0, sticky="w")
             ttk.Entry(publishing, textvariable=self.book_var).grid(
                 row=0, column=1, sticky="ew", padx=8
             )
@@ -273,30 +271,15 @@ def create_application(root: Any, controller: DesktopController | None = None) -
             ttk.Entry(publishing, textvariable=self.language_var, width=10).grid(
                 row=0, column=4, sticky="ew", padx=(6, 0)
             )
-            ttk.Label(publishing, text="New published copy:").grid(
-                row=1, column=0, sticky="w", pady=(10, 0)
-            )
-            ttk.Entry(publishing, textvariable=self.published_book_var).grid(
-                row=1, column=1, sticky="ew", padx=8, pady=(10, 0)
-            )
-            ttk.Button(
-                publishing,
-                text="Choose output parent…",
-                command=self.choose_published_output,
-            ).grid(row=1, column=2, padx=(0, 6), pady=(10, 0))
-            ttk.Label(publishing, text="Deployment ZIP:").grid(
-                row=2, column=0, sticky="w", pady=(10, 0)
-            )
-            ttk.Entry(publishing, textvariable=self.package_var).grid(
-                row=2, column=1, sticky="ew", padx=8, pady=(10, 0)
-            )
-            ttk.Button(publishing, text="Choose package…", command=self.choose_package).grid(
-                row=2, column=2, padx=(0, 6), pady=(10, 0)
-            )
             ttk.Label(
                 publishing,
-                text="Publishing uses the compressed-copy folder above and never changes the source book.",
-            ).grid(row=2, column=3, columnspan=2, sticky="w", pady=(10, 0))
+                text=(
+                    "Publishing updates this ADT website in place with the compressed-copy folder above. "
+                    "It does not create, replace, or modify any ZIP package."
+                ),
+                wraplength=850,
+                justify="left",
+            ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(10, 0))
 
             system = ttk.LabelFrame(main, text="System analysis", padding=12)
             system.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(0, 10))
@@ -318,7 +301,7 @@ def create_application(root: Any, controller: DesktopController | None = None) -
             self.start_button.grid(row=0, column=1, padx=(0, 8))
             self.resume_button = ttk.Button(actions, text="Resume saved job…", command=self.resume_job)
             self.resume_button.grid(row=0, column=2, padx=(0, 8))
-            self.publish_button = ttk.Button(actions, text="Publish ADT copy", command=self.publish)
+            self.publish_button = ttk.Button(actions, text="Update ADT website", command=self.publish)
             self.publish_button.grid(row=0, column=3, padx=(0, 8))
             self.cancel_button = ttk.Button(
                 actions,
@@ -464,30 +447,10 @@ def create_application(root: Any, controller: DesktopController | None = None) -
                 self.ffmpeg_var.set(selected)
 
         def choose_book(self) -> None:
-            selected = filedialog.askdirectory(title="Choose source ADT website")
+            selected = filedialog.askdirectory(title="Choose ADT website to update")
             if not selected:
                 return
             self.book_var.set(selected)
-            book = Path(selected)
-            published = book.parent / f"{book.name}-published"
-            self.published_book_var.set(str(published))
-            self.package_var.set(str(book.parent / f"{book.name}-ADT.zip"))
-
-        def choose_published_output(self) -> None:
-            selected = filedialog.askdirectory(title="Choose parent for new ADT website copy")
-            if not selected:
-                return
-            book_name = Path(self.book_var.get().strip() or "ADT-book").name
-            self.published_book_var.set(str(Path(selected) / f"{book_name}-published"))
-
-        def choose_package(self) -> None:
-            selected = filedialog.asksaveasfilename(
-                title="Choose deployment package",
-                defaultextension=".zip",
-                filetypes=[("ZIP deployment package", "*.zip")],
-            )
-            if selected:
-                self.package_var.set(selected)
 
         def _apply_profile(self, _event: object | None = None) -> None:
             if self.profile_var.get().startswith("ADT website"):
@@ -554,11 +517,10 @@ def create_application(root: Any, controller: DesktopController | None = None) -
         def publish(self) -> None:
             compressed = self.output_var.get().strip()
             book = self.book_var.get().strip()
-            output = self.published_book_var.get().strip()
-            if not compressed or not book or not output:
+            if not compressed or not book:
                 messagebox.showerror(
                     "Cannot publish",
-                    "Choose the compressed-copy folder, source ADT website, and new published-copy path.",
+                    "Choose the compressed-copy folder and the ADT website to update.",
                     parent=self.root,
                 )
                 return
@@ -566,8 +528,7 @@ def create_application(root: Any, controller: DesktopController | None = None) -
                 settings = DesktopPublishSettings(
                     videos=compressed,
                     book=book,
-                    output=output,
-                    package=self.package_var.get().strip() or None,
+                    in_place=True,
                     language=self.language_var.get().strip() or None,
                     recursive=self.recursive_var.get(),
                     maximum_bytes=mebibytes_to_bytes(self.maximum_size_var.get()),
@@ -731,15 +692,11 @@ def create_application(root: Any, controller: DesktopController | None = None) -
                 self.overall_progress_text_var.set("Overall progress: 100%")
                 self.current_progress_var.set(100)
                 self.current_progress_text_var.set("Publishing finished")
-                package_text = f" Package: {value.package.path}." if value.package else ""
                 self.status_var.set(
-                    f"Published {len(value.videos)} video(s) to {value.output_book}. "
-                    f"Bundle version: {value.bundle_version}.{package_text}"
+                    f"Updated {value.output_book} with {len(value.videos)} video(s). "
+                    f"Bundle version: {value.bundle_version}. No ZIP package was changed."
                 )
-                self._append_log(f"Published ADT copy: {value.output_book}")
-                if value.package:
-                    self._append_log(f"Deployment ZIP: {value.package.path}")
-                    self._append_log(f"SHA-256: {value.package.sha256}")
+                self._append_log(f"Updated ADT website in place: {value.output_book}")
             self._finish_task()
 
         def _handle_error(self, value: object) -> None:
@@ -828,7 +785,7 @@ def smoke_test() -> int:
         root.withdraw()
         application = create_application(root)
         root.update_idletasks()
-        if application.publish_button.cget("text") != "Publish ADT copy":
+        if application.publish_button.cget("text") != "Update ADT website":
             raise RuntimeError("Publishing controls were not created.")
         if "Drop one video" not in application.drop_zone.cget("text"):
             raise RuntimeError("Drag-and-drop controls were not created.")

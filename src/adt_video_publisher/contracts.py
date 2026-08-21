@@ -69,7 +69,7 @@ COMMANDS: Final[tuple[dict[str, str], ...]] = (
     {"name": "plan", "status": "available", "purpose": "Calculate safe paths, settings, and concurrency."},
     {"name": "compress", "status": "available", "purpose": "Create validated compressed copies."},
     {"name": "verify", "status": "available", "purpose": "Validate compressed video outputs."},
-    {"name": "publish", "status": "available", "purpose": "Publish videos and rebuild an ADT package."},
+    {"name": "publish", "status": "available", "purpose": "Publish videos into an ADT website in place or as a copy."},
     {"name": "resume", "status": "available", "purpose": "Resume an interrupted job."},
     {"name": "ui", "status": "available", "purpose": "Open the optional desktop interface."},
 )

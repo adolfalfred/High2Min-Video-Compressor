@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .errors import InvalidInputError, ProbeFailedError, ProbeUnavailableError
+from .processes import hidden_process_options
 
 ProbeKind = Literal["ffprobe", "ffmpeg"]
 
@@ -286,6 +287,7 @@ def probe_media(
             errors="replace",
             timeout=timeout_seconds,
             check=False,
+            **hidden_process_options(),
         )
         if result.returncode != 0:
             detail = result.stderr.strip() or "unknown FFprobe error"
@@ -305,7 +307,7 @@ def probe_media(
         errors="replace",
         timeout=timeout_seconds,
         check=False,
+        **hidden_process_options(),
     )
     description = "\n".join(part for part in (result.stdout, result.stderr) if part)
     return parse_ffmpeg_description(path, size_bytes, description)
-

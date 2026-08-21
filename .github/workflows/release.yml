@@ -158,6 +158,8 @@ jobs:
 
           Windows users can double-click **High2Min Video Compressor.exe** without opening a terminal. The separate **high2min.exe** remains available for command-line automation. macOS users receive a native architecture-matched **High2Min Video Compressor.app** rather than a shell wrapper around an external Python runtime.
 
+          Windows compression jobs keep FFmpeg and FFprobe child processes hidden. In the desktop interface, **Publish ADT** now updates the selected website repo itself using staged validation and rollback protection, keeps the hand-sign control available, and permits voice-over narration and sign-language video to play together; it does not create, replace, or modify ZIP packages.
+
           The binaries are not Authenticode- or Apple Developer ID-signed. macOS bundles have ad-hoc integrity signatures, but Windows SmartScreen and macOS Gatekeeper publisher warnings are still expected. Verify the matching SHA-256 file and GitHub provenance attestation before opening a downloaded archive.
 
           Verify provenance with:

@@ -29,9 +29,11 @@ The interface creates compressed copies in a separate destination and never repl
 - safe stop after currently running encodes;
 - saved-job resume and links to JSON/CSV report locations.
 - separate compression and publishing tabs;
-- source ADT website selection, a separate published-copy destination, language selection, and optional exact-manifest deployment ZIP creation.
+- ADT website selection, optional language selection, and transactional in-place video publishing.
 
-ADT publishing uses the compressed-copy folder as its authoritative input. It never changes the selected source website, refuses to replace an existing destination, increments the copied book's bundle version, and writes a SHA-256 sidecar beside a deployment ZIP.
+ADT publishing uses the compressed-copy folder as its authoritative input and updates the selected website itself. It validates a staged production copy before changing the repo, enables and verifies the hand-sign video control, and removes the runtime's mutual-pausing behavior so voice-over narration and sign-language video can play together. It replaces only the chosen language's videos and mapping plus generated config, compatible runtime bundles, and manifest files, preserves development files, increments the bundle version, and restores the original ADT assets if final validation fails. The desktop publishing step never creates, replaces, or modifies a ZIP package.
+
+On Windows, FFmpeg and FFprobe run without visible child console windows. Error and completion information remains available in the interface's status and activity log.
 
 Keyboard shortcuts:
 

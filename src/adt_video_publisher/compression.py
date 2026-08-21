@@ -22,6 +22,7 @@ from .errors import (
 )
 from .media import MediaInfo, probe_media
 from .planning import DEFAULT_MAXIMUM_BYTES, EncodingPlan, calculate_encoding_plan
+from .processes import hidden_process_options
 
 DEFAULT_PRESET = "medium"
 DEFAULT_CRF = 35
@@ -183,6 +184,7 @@ def _run_ffmpeg(command: Sequence[str], timeout_seconds: float | None) -> subpro
         errors="replace",
         timeout=timeout_seconds,
         check=False,
+        **hidden_process_options(),
     )
 
 
@@ -283,6 +285,7 @@ def _run_ffmpeg_with_progress(
         text=True,
         encoding="utf-8",
         errors="replace",
+        **hidden_process_options(),
     )
     stdout_lines: list[str] = []
     started = time.monotonic()

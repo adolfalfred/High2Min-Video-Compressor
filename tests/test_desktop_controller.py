@@ -151,9 +151,30 @@ class DesktopControllerTests(unittest.TestCase):
         self.assertEqual(keywords["book"], "source-book")
         self.assertEqual(keywords["output"], "published-book")
         self.assertEqual(keywords["package"], "book.zip")
+        self.assertFalse(keywords["in_place"])
         self.assertEqual(keywords["language"], "en-GB")
         self.assertTrue(keywords["recursive"])
         self.assertIs(keywords["progress_callback"], progress)
+
+    def test_publish_forwards_in_place_desktop_mode_without_zip(self) -> None:
+        calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def publisher(*args: object, **kwargs: object) -> object:
+            calls.append((args, kwargs))
+            return object()
+
+        controller = DesktopController(publisher=publisher)  # type: ignore[arg-type]
+        controller.publish(
+            DesktopPublishSettings(
+                videos="compressed",
+                book="source-book",
+                in_place=True,
+            )
+        )
+        _arguments, keywords = calls[0]
+        self.assertIsNone(keywords["output"])
+        self.assertIsNone(keywords["package"])
+        self.assertTrue(keywords["in_place"])
 
 
 if __name__ == "__main__":

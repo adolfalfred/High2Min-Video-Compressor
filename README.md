@@ -10,7 +10,7 @@ These certificate-free binaries are built on native GitHub-hosted runners and pu
 
 Maintainers can follow the [certificate-free release checklist](docs/release-checklist.md) to build and publish a new version.
 
-Version 0.8.1 uses the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages.
+Version 0.8.2 uses the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages. FFmpeg and FFprobe remain hidden during Windows desktop jobs, so compression does not flash console windows.
 
 Windows releases provide a terminal-free `High2Min Video Compressor.exe` for desktop users and a separate console-enabled `high2min.exe` for Codex, Claude Code, scripts, and CI. Native macOS builds provide a real `.app` bundle with an architecture-matched embedded runtime; no separate Python installation is needed.
 
@@ -18,7 +18,7 @@ The project is CLI-first: Codex, Claude Code, scripts, and CI systems can operat
 
 ## Complete implementation
 
-The verified application now includes the CLI contract, deterministic exit codes, versioned JSON schemas, media probing, safe path planning, silent FFmpeg compression, SSIM validation, adaptive scaling, live percentage events, CPU/RAM/disk detection, adaptive concurrent batches, durable resume state, JSON/CSV reports, transactional ADT website publishing, deterministic SCORM ZIP creation, and an accessible desktop interface with native file/folder drag-and-drop.
+The verified application now includes the CLI contract, deterministic exit codes, versioned JSON schemas, media probing, safe path planning, silent FFmpeg compression, SSIM validation, adaptive scaling, live percentage events, CPU/RAM/disk detection, adaptive concurrent batches, durable resume state, JSON/CSV reports, transactional in-place ADT website publishing, optional deterministic SCORM ZIP creation, and an accessible desktop interface with native file/folder drag-and-drop.
 
 Run the current contract commands without installation:
 
@@ -38,7 +38,19 @@ python -m adt_video_publisher resume --job "D:\videos-compressed\.adt-video-job.
 python -m adt_video_publisher verify --input "D:\videos-compressed" --json
 ```
 
-Publish compressed `page_N.mp4` videos into a new ADT website copy and create a deployment package:
+Update an ADT website repo itself with compressed `page_N.mp4` videos without creating or modifying a ZIP:
+
+```powershell
+python -m adt_video_publisher publish `
+  --input "D:\videos-compressed" `
+  --book "D:\book-adt" `
+  --in-place `
+  --json --progress ndjson
+```
+
+The desktop Publish ADT step always uses this in-place mode. It validates a staged production website first, keeps the hand-sign video control enabled, and makes sign-language video independent from voice-over narration so both can play together. It replaces only the chosen language's video directory and mapping plus the generated config, runtime bundles, and manifest, preserves repository/development files, and rolls back those ADT assets if final validation fails. It never creates, replaces, or modifies a ZIP package.
+
+The CLI can alternatively publish into a new ADT website copy and create a deployment package:
 
 ```powershell
 python -m adt_video_publisher publish `
@@ -49,7 +61,7 @@ python -m adt_video_publisher publish `
   --json --progress ndjson
 ```
 
-Publishing never modifies the source ADT website. The compressed folder is authoritative for `videos.json`; sparse page mappings are supported. The publisher enables sign language, increments `bundleVersion`, rebuilds `imsmanifest.xml`, excludes undeclared development files, validates the new website, writes an exact-manifest ZIP, and creates its `.sha256` sidecar.
+The compressed folder is authoritative for `videos.json`; sparse page mappings are supported. Both modes enable sign language, increment `bundleVersion`, rebuild `imsmanifest.xml`, and validate the production website. The separate-copy CLI mode can also write an exact-manifest ZIP and its `.sha256` sidecar.
 
 With `--json`, the final result is written to stdout. With `--progress ndjson`, structured progress events are written independently to stderr.
 

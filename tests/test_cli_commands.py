@@ -219,7 +219,34 @@ class CliCommandTests(unittest.TestCase):
         self.assertEqual(keywords["book"], "book")
         self.assertEqual(keywords["output"], "published-book")
         self.assertEqual(keywords["package"], "book.zip")
+        self.assertFalse(keywords["in_place"])
         self.assertIsNotNone(keywords["progress_callback"])
+
+    def test_publish_dispatches_explicit_in_place_mode_without_package(self) -> None:
+        published = SimpleNamespace(
+            videos=(object(),),
+            output_book=Path("book"),
+            language="en-GB",
+            bundle_version="5",
+            package=None,
+            to_result_document=lambda: {"ok": True},
+        )
+        with patch("adt_video_publisher.cli.publish_adt", return_value=published) as publish:
+            exit_code = main(
+                [
+                    "publish",
+                    "--input", "compressed",
+                    "--book", "book",
+                    "--in-place",
+                ],
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(exit_code, ExitCode.SUCCESS)
+        keywords = publish.call_args.kwargs
+        self.assertIsNone(keywords["output"])
+        self.assertIsNone(keywords["package"])
+        self.assertTrue(keywords["in_place"])
 
 
 if __name__ == "__main__":

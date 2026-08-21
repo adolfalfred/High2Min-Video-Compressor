@@ -44,8 +44,9 @@ class DesktopSettings:
 class DesktopPublishSettings:
     videos: str
     book: str
-    output: str
+    output: str | None = None
     package: str | None = None
+    in_place: bool = False
     language: str | None = None
     recursive: bool = False
     maximum_bytes: int = DEFAULT_MAXIMUM_BYTES
@@ -189,6 +190,7 @@ class DesktopController:
             book=settings.book,
             output=settings.output,
             package=settings.package or None,
+            in_place=settings.in_place,
             language=settings.language or None,
             recursive=settings.recursive,
             maximum_bytes=settings.maximum_bytes,

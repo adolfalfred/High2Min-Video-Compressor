@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 from adt_video_publisher.errors import InvalidInputError, PublishFailedError
@@ -76,6 +77,16 @@ def make_book(root: Path, *, bundle_version: object = "7") -> Path:
         ),
         encoding="utf-8",
     )
+    (book / "assets" / "base.bundle.local.js").write_text(
+        (
+            'const hand="sign-language-label",feature="signLanguage";'
+            'const voice="activate-tts-label",read="readAloud";'
+            '(0,ui.useEffect)(()=>{n==="tts"&&d.current?.pause()},[n]);'
+            'const video={onPlay:()=>a("sign-language")};'
+            '(0,ui.useEffect)(()=>{l==="sign-language"&&(R(),r(!1),s(0),b(!1))},[l,R,r,s,b]);'
+        ),
+        encoding="utf-8",
+    )
     (book / "content" / "pages.json").write_text(
         json.dumps(
             [
@@ -96,6 +107,126 @@ def make_book(root: Path, *, bundle_version: object = "7") -> Path:
 
 
 class PublishingTests(unittest.TestCase):
+    def test_in_place_publish_updates_repo_and_never_touches_zip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"compressed-one")
+            (videos / "page_3.mp4").write_bytes(b"compressed-three")
+            existing_zip = root / "deployment.zip"
+            existing_zip.write_bytes(b"leave-this-zip-alone")
+
+            result = publish_adt(
+                videos,
+                book=book,
+                in_place=True,
+                validate_media=False,
+            )
+
+            self.assertEqual(result.output_book, book.resolve())
+            self.assertIsNone(result.package)
+            self.assertEqual(existing_zip.read_bytes(), b"leave-this-zip-alone")
+            self.assertTrue((book / "AGENTS.md").is_file())
+            config = json.loads((book / "assets" / "config.json").read_text(encoding="utf-8"))
+            self.assertTrue(config["features"]["signLanguage"])
+            self.assertTrue(config["features"]["readAloud"])
+            runtime = (book / "assets" / "base.bundle.local.js").read_text(encoding="utf-8")
+            self.assertIn('onPlay:()=>{}', runtime)
+            self.assertNotIn('a("sign-language")', runtime)
+            self.assertNotIn('n==="tts"&&d.current?.pause()', runtime)
+            self.assertNotIn('l==="sign-language"&&(R(),r(!1),s(0),b(!1))', runtime)
+            mappings = json.loads(
+                (book / "content" / "i18n" / "en-GB" / "videos.json").read_text()
+            )
+            self.assertEqual(mappings, {"video-1": "page_1.mp4", "video-3": "page_3.mp4"})
+            self.assertFalse((book / "content" / "i18n" / "en-GB" / "video" / "page_2.mp4").exists())
+            self.assertEqual(
+                validate_adt_website(book, allow_unmanifested=True)["video_count"],
+                2,
+            )
+            self.assertEqual(list(root.glob(".*.adt-publish-*")), [])
+
+    def test_publish_stops_safely_when_runtime_has_no_hand_control(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            (book / "assets" / "base.bundle.local.js").write_text(
+                "const runtimeWithoutSignLanguage = true;",
+                encoding="utf-8",
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            before = hash_tree(book)
+
+            with self.assertRaises(PublishFailedError):
+                publish_adt(
+                    videos,
+                    book=book,
+                    in_place=True,
+                    validate_media=False,
+                )
+
+            self.assertEqual(hash_tree(book), before)
+            self.assertEqual(list(root.glob(".*.adt-publish-*")), [])
+
+    def test_in_place_publish_rolls_back_if_final_validation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            before = hash_tree(book)
+            actual_validator = validate_adt_website
+            validation_calls = 0
+
+            def fail_final_validation(*args: object, **kwargs: object) -> dict[str, object]:
+                nonlocal validation_calls
+                validation_calls += 1
+                if validation_calls == 2:
+                    raise PublishFailedError("simulated final validation failure")
+                return actual_validator(*args, **kwargs)  # type: ignore[arg-type]
+
+            with patch(
+                "adt_video_publisher.publishing.validate_adt_website",
+                side_effect=fail_final_validation,
+            ):
+                with self.assertRaises(PublishFailedError):
+                    publish_adt(
+                        videos,
+                        book=book,
+                        in_place=True,
+                        validate_media=False,
+                    )
+
+            self.assertEqual(hash_tree(book), before)
+            self.assertEqual(list(root.glob(".*.adt-publish-*")), [])
+
+    def test_in_place_mode_rejects_zip_without_modifying_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            package = root / "existing.zip"
+            package.write_bytes(b"original-package")
+
+            with self.assertRaises(InvalidInputError):
+                publish_adt(
+                    videos,
+                    book=book,
+                    package=package,
+                    in_place=True,
+                    validate_media=False,
+                )
+
+            self.assertEqual(package.read_bytes(), b"original-package")
+
     def test_publish_is_authoritative_transactional_and_packaged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -130,6 +261,10 @@ class PublishingTests(unittest.TestCase):
             self.assertFalse((output / "content" / "i18n" / "en-GB" / "video" / "page_2.mp4").exists())
             self.assertFalse((output / "AGENTS.md").exists())
             self.assertEqual(validate_adt_website(output)["video_count"], 2)
+            published_runtime = (output / "assets" / "base.bundle.local.js").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("onPlay:()=>{}", published_runtime)
             package_report = validate_deployment_package(package)
             self.assertEqual(package_report["entry_count"], len(declared_manifest_files(output / "imsmanifest.xml")) + 1)
             checksum = Path(str(package) + ".sha256").read_text(encoding="ascii")
