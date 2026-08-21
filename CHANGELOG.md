@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.8.2 - in development
+## 0.8.3 - 2026-08-21
+
+- Synchronize generated offline-preloader settings and video mappings during ADT publishing.
+- Version the offline preloader and runtime bundle URLs so browsers load the newly published controls.
+- Resume the visible silent sign-language video after narration starts on media-focus-limited browsers.
+- Preserve transactional rollback for every HTML and preloader file changed by synchronization.
+
+## 0.8.2 - 2026-08-21
 
 - Suppress FFmpeg and FFprobe console-window popups during Windows desktop jobs.
 - Make the desktop Publish ADT step update the selected website in place.

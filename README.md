@@ -10,7 +10,7 @@ These certificate-free binaries are built on native GitHub-hosted runners and pu
 
 Maintainers can follow the [certificate-free release checklist](docs/release-checklist.md) to build and publish a new version.
 
-Version 0.8.2 uses the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages. FFmpeg and FFprobe remain hidden during Windows desktop jobs, so compression does not flash console windows.
+Version 0.8.3 uses the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages. FFmpeg and FFprobe remain hidden during Windows desktop jobs, so compression does not flash console windows.
 
 Windows releases provide a terminal-free `High2Min Video Compressor.exe` for desktop users and a separate console-enabled `high2min.exe` for Codex, Claude Code, scripts, and CI. Native macOS builds provide a real `.app` bundle with an architecture-matched embedded runtime; no separate Python installation is needed.
 
@@ -48,7 +48,7 @@ python -m adt_video_publisher publish `
   --json --progress ndjson
 ```
 
-The desktop Publish ADT step always uses this in-place mode. It validates a staged production website first, keeps the hand-sign video control enabled, and makes sign-language video independent from voice-over narration so both can play together. It replaces only the chosen language's video directory and mapping plus the generated config, runtime bundles, and manifest, preserves repository/development files, and rolls back those ADT assets if final validation fails. It never creates, replaces, or modifies a ZIP package.
+The desktop Publish ADT step always uses this in-place mode. It validates a staged production website first, keeps the hand-sign video control enabled, refreshes generated offline-preloader data and cache versions, and makes sign-language video independent from voice-over narration so both can play together. It replaces only the chosen language's video directory and mapping plus the generated config, runtime bundles, preloader, affected HTML, and manifest, preserves repository/development files, and rolls back those ADT assets if final validation fails. It never creates, replaces, or modifies a ZIP package.
 
 The CLI can alternatively publish into a new ADT website copy and create a deployment package:
 

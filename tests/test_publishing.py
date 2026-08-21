@@ -84,6 +84,8 @@ def make_book(root: Path, *, bundle_version: object = "7") -> Path:
             '(0,ui.useEffect)(()=>{n==="tts"&&d.current?.pause()},[n]);'
             'const video={onPlay:()=>a("sign-language")};'
             '(0,ui.useEffect)(()=>{l==="sign-language"&&(R(),r(!1),s(0),b(!1))},[l,R,r,s,b]);'
+            'audio.play().then(()=>{u("tts"),r(!0)});'
+            'audio.resume().then(()=>{u("tts"),r(!0),document.querySelectorAll("video").forEach(e=>{e.paused&&e.play().catch(()=>{})})});'
         ),
         encoding="utf-8",
     )
@@ -106,7 +108,101 @@ def make_book(root: Path, *, bundle_version: object = "7") -> Path:
     return book
 
 
+def read_offline_inline(preloader: Path) -> dict[str, object]:
+    source = preloader.read_text(encoding="utf-8")
+    marker = "var INLINE = "
+    start = source.index(marker) + len(marker)
+    end = source.index(";\n  var BASE_DIR", start)
+    payload = json.loads(source[start:end])
+    if not isinstance(payload, dict):
+        raise AssertionError("offline preloader INLINE payload is not an object")
+    return payload
+
+
 class PublishingTests(unittest.TestCase):
+    def test_publish_refreshes_offline_preloader_settings_mappings_and_cache_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            config_path = book / "assets" / "config.json"
+            stale_config = json.loads(config_path.read_text(encoding="utf-8"))
+            stale_config["features"] = {"signLanguage": False, "readAloud": False}
+            config_path.write_text(json.dumps(stale_config), encoding="utf-8")
+            index = book / "index.html"
+            index.write_text(
+                '<title>Test</title>'
+                '<script src="./assets/offline-preloader.js?v=7"></script>'
+                '<script src="./assets/base.bundle.local.js"></script>',
+                encoding="utf-8",
+            )
+            preloader = book / "assets" / "offline-preloader.js"
+            preloader.write_text(
+                "// generated offline resources\n"
+                "(function () {\n"
+                "  var INLINE = "
+                + json.dumps(
+                    {
+                        "./assets/config.json": stale_config,
+                        "./content/i18n/en-GB/videos.json": {},
+                        "./index.html": index.read_text(encoding="utf-8"),
+                    },
+                    separators=(",", ":"),
+                )
+                + ";\n  var BASE_DIR = \"\";\n})();\n",
+                encoding="utf-8",
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"compressed-one")
+            (videos / "page_3.mp4").write_bytes(b"compressed-three")
+
+            publish_adt(
+                videos,
+                book=book,
+                in_place=True,
+                validate_media=False,
+            )
+
+            updated_index = index.read_text(encoding="utf-8")
+            self.assertIn("offline-preloader.js?v=8", updated_index)
+            self.assertNotIn("offline-preloader.js?v=7", updated_index)
+            self.assertIn("base.bundle.local.js?v=8", updated_index)
+            inline = read_offline_inline(preloader)
+            embedded_config = inline["./assets/config.json"]
+            self.assertIsInstance(embedded_config, dict)
+            self.assertEqual(embedded_config["bundleVersion"], "8")
+            self.assertTrue(embedded_config["features"]["signLanguage"])
+            self.assertTrue(embedded_config["features"]["readAloud"])
+            self.assertEqual(
+                inline["./content/i18n/en-GB/videos.json"],
+                {"video-1": "page_1.mp4", "video-3": "page_3.mp4"},
+            )
+            self.assertEqual(inline["./index.html"], updated_index)
+
+    def test_publish_stops_safely_when_offline_preloader_is_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            preloader = book / "assets" / "offline-preloader.js"
+            preloader.write_text("var INLINE = broken;\n", encoding="utf-8")
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            before = hash_tree(book)
+
+            with self.assertRaises(PublishFailedError):
+                publish_adt(
+                    videos,
+                    book=book,
+                    in_place=True,
+                    validate_media=False,
+                )
+
+            self.assertEqual(hash_tree(book), before)
+            self.assertEqual(list(root.glob(".*.adt-publish-*")), [])
+
     def test_in_place_publish_updates_repo_and_never_touches_zip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -137,6 +233,11 @@ class PublishingTests(unittest.TestCase):
             self.assertNotIn('a("sign-language")', runtime)
             self.assertNotIn('n==="tts"&&d.current?.pause()', runtime)
             self.assertNotIn('l==="sign-language"&&(R(),r(!1),s(0),b(!1))', runtime)
+            self.assertIn(
+                'u("tts"),r(!0),document.querySelectorAll("video[autoplay]").forEach',
+                runtime,
+            )
+            self.assertNotIn('document.querySelectorAll("video").forEach', runtime)
             mappings = json.loads(
                 (book / "content" / "i18n" / "en-GB" / "videos.json").read_text()
             )

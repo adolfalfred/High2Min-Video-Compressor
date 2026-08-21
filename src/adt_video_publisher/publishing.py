@@ -37,6 +37,16 @@ STORED_SUFFIXES: Final = {
     ".mp3", ".mp4", ".ogg", ".pdf", ".png", ".webm", ".webp", ".woff", ".woff2", ".zip",
 }
 RUNTIME_BUNDLE_PATTERN: Final = "base.bundle*.js"
+OFFLINE_PRELOADER_RELATIVE: Final = Path("assets") / "offline-preloader.js"
+OFFLINE_INLINE_MARKER: Final = "var INLINE = "
+OFFLINE_INLINE_END_MARKER: Final = ";\n  var BASE_DIR"
+RUNTIME_SCRIPT_PATTERN: Final = re.compile(
+    r'(?P<path>(?:\./)?assets/base\.bundle(?:\.[A-Za-z0-9_-]+)*\.js)'
+    r'(?:\?[^"\'<>\s]*)?'
+)
+OFFLINE_SCRIPT_PATTERN: Final = re.compile(
+    r'(?P<path>(?:\./)?assets/offline-preloader\.js)(?:\?[^"\'<>\s]*)?'
+)
 VIDEO_PAUSES_FOR_AUDIO_PATTERN: Final = re.compile(
     r'[$A-Za-z_][$\w]*\s*===\s*"tts"\s*&&\s*[$A-Za-z_][$\w]*\.current\?\.pause\(\)'
 )
@@ -47,6 +57,18 @@ AUDIO_PAUSES_FOR_VIDEO_PATTERN: Final = re.compile(
     r'[$A-Za-z_][$\w]*\s*===\s*"sign-language"\s*&&\s*\('
     r'[$A-Za-z_][$\w]*\(\)\s*,\s*[$A-Za-z_][$\w]*\(!1\)\s*,\s*'
     r'[$A-Za-z_][$\w]*\(0\)\s*,\s*[$A-Za-z_][$\w]*\(!1\)\s*\)'
+)
+AUDIO_START_SUCCESS_PATTERN: Final = re.compile(
+    r'(?P<state>[$A-Za-z_][$\w]*\("tts"\)\s*,\s*[$A-Za-z_][$\w]*\(!0\))'
+    r'(?!\s*,\s*document\.querySelectorAll\("video\[autoplay\]"\))'
+)
+LEGACY_RESUME_SIGN_VIDEO_SNIPPET: Final = (
+    'document.querySelectorAll("video").forEach(e=>{'
+    'e.paused&&e.play().catch(()=>{})})'
+)
+RESUME_SIGN_VIDEO_SNIPPET: Final = (
+    'document.querySelectorAll("video[autoplay]").forEach(e=>{'
+    'e.paused&&e.play().catch(()=>{})})'
 )
 
 
@@ -395,10 +417,19 @@ def _enable_parallel_accessibility_media(book: Path) -> tuple[Path, ...]:
         updated = VIDEO_PAUSES_FOR_AUDIO_PATTERN.sub("!1", source)
         updated = VIDEO_CLAIMS_EXCLUSIVE_AUDIO_PATTERN.sub("onPlay:()=>{}", updated)
         updated = AUDIO_PAUSES_FOR_VIDEO_PATTERN.sub("!1", updated)
+        updated = updated.replace(
+            LEGACY_RESUME_SIGN_VIDEO_SNIPPET,
+            RESUME_SIGN_VIDEO_SNIPPET,
+        )
+        updated = AUDIO_START_SUCCESS_PATTERN.sub(
+            lambda match: f"{match.group('state')},{RESUME_SIGN_VIDEO_SNIPPET}",
+            updated,
+        )
         if (
             VIDEO_PAUSES_FOR_AUDIO_PATTERN.search(updated)
             or VIDEO_CLAIMS_EXCLUSIVE_AUDIO_PATTERN.search(updated)
             or AUDIO_PAUSES_FOR_VIDEO_PATTERN.search(updated)
+            or AUDIO_START_SUCCESS_PATTERN.search(updated)
         ):
             raise PublishFailedError(
                 f"Could not make narration and sign-language video independent in '{path.name}'."
@@ -412,6 +443,89 @@ def _enable_parallel_accessibility_media(book: Path) -> tuple[Path, ...]:
             "Publishing stopped before changing the website."
         )
     return tuple(supported)
+
+
+def _synchronize_offline_preloader(
+    book: Path,
+    *,
+    language: str,
+    bundle_version: str,
+) -> tuple[Path, ...]:
+    """Refresh embedded HTML/JSON so the offline layer cannot serve stale ADT settings."""
+
+    preloader = book / OFFLINE_PRELOADER_RELATIVE
+    if not preloader.is_file():
+        return ()
+
+    changed: list[Path] = []
+    for html_path in sorted(book.rglob("*.html"), key=lambda path: str(path).casefold()):
+        try:
+            source = html_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise PublishFailedError(f"ADT HTML is unreadable: '{html_path}'.") from exc
+        updated = OFFLINE_SCRIPT_PATTERN.sub(
+            lambda match: f"{match.group('path')}?v={bundle_version}",
+            source,
+        )
+        updated = RUNTIME_SCRIPT_PATTERN.sub(
+            lambda match: f"{match.group('path')}?v={bundle_version}",
+            updated,
+        )
+        if updated != source:
+            html_path.write_text(updated, encoding="utf-8")
+            changed.append(html_path.relative_to(book))
+
+    try:
+        preloader_source = preloader.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise PublishFailedError(f"Offline preloader is unreadable: '{preloader}'.") from exc
+    payload_start = preloader_source.find(OFFLINE_INLINE_MARKER)
+    if payload_start < 0:
+        raise PublishFailedError("Offline preloader has no INLINE resource map.")
+    payload_start += len(OFFLINE_INLINE_MARKER)
+    payload_end = preloader_source.find(OFFLINE_INLINE_END_MARKER, payload_start)
+    if payload_end < 0:
+        raise PublishFailedError("Offline preloader INLINE resource map is incomplete.")
+    try:
+        inline = json.loads(preloader_source[payload_start:payload_end])
+    except json.JSONDecodeError as exc:
+        raise PublishFailedError("Offline preloader INLINE resource map is invalid JSON.") from exc
+    if not isinstance(inline, dict):
+        raise PublishFailedError("Offline preloader INLINE resource map must contain an object.")
+
+    inline["./assets/config.json"] = _read_json(
+        book / "assets" / "config.json", "assets/config.json"
+    )
+    inline[f"./content/i18n/{language}/videos.json"] = _read_json(
+        book / "content" / "i18n" / language / "videos.json",
+        f"{language}/videos.json",
+    )
+    for key in tuple(inline):
+        if not isinstance(key, str):
+            continue
+        relative_text = key[2:] if key.startswith("./") else key
+        try:
+            relative = _safe_archive_path(relative_text)
+        except PublishFailedError:
+            continue
+        source_path = book / Path(*relative.parts)
+        if not source_path.is_file():
+            continue
+        if source_path.suffix.lower() == ".html":
+            inline[key] = source_path.read_text(encoding="utf-8")
+        elif source_path.suffix.lower() == ".json":
+            inline[key] = _read_json(source_path, relative.as_posix())
+
+    serialized = json.dumps(inline, ensure_ascii=True, separators=(",", ":"))
+    updated_preloader = (
+        preloader_source[:payload_start]
+        + serialized
+        + preloader_source[payload_end:]
+    )
+    if updated_preloader != preloader_source:
+        preloader.write_text(updated_preloader, encoding="utf-8")
+        changed.append(OFFLINE_PRELOADER_RELATIVE)
+    return tuple(dict.fromkeys(changed))
 
 
 def validate_adt_website(
@@ -774,6 +888,11 @@ def publish_adt(
         staged_config["bundleVersion"] = incremented
         _write_json(staged_config_path, staged_config)
         runtime_relatives = _enable_parallel_accessibility_media(stage)
+        offline_relatives = _synchronize_offline_preloader(
+            stage,
+            language=selected_language,
+            bundle_version=bundle_version,
+        )
         _update_manifest(stage)
         validation = validate_adt_website(stage, language=selected_language)
         if validation["video_count"] != len(items):
@@ -792,7 +911,12 @@ def publish_adt(
             )
 
         if in_place:
-            _commit_in_place(stage, source_book, selected_language, runtime_relatives)
+            _commit_in_place(
+                stage,
+                source_book,
+                selected_language,
+                tuple(dict.fromkeys((*runtime_relatives, *offline_relatives))),
+            )
             _remove_generated_directory(stage, output_book.parent)
         else:
             stage.replace(output_book)
