@@ -24,6 +24,10 @@ Get-Content .\High2Min-Video-Compressor-VERSION-windows-x86_64.zip.sha256
 
 The two long hash values must be identical.
 
+After verification, extract the complete ZIP and double-click
+`High2Min Video Compressor.exe`. Do not move the executable away from the accompanying `_internal`
+directory. `high2min.exe` is the separate command-line interface for automation.
+
 Linux or macOS:
 
 ```sh
@@ -47,6 +51,6 @@ A successful result links the archive to this repository, workflow, tag, and com
 The certificate-free releases are not Authenticode-signed or Apple-notarized.
 
 - Windows may display a Microsoft Defender SmartScreen warning because the publisher is unidentified. Keep SmartScreen and Microsoft Defender enabled. Verify the checksum and provenance before deciding whether to run the application.
-- macOS normally blocks an unidentified, unnotarized application. Apple warns that overriding this protection carries risk. Only consider **Privacy & Security → Open Anyway** after verifying the release and only on a machine where you accept that risk.
+- macOS normally blocks an unidentified, unnotarized application. The app is ad-hoc signed to verify internal bundle integrity, but this is not an Apple publisher signature. Apple warns that overriding protection carries risk. Only consider **Privacy & Security → Open Anyway** after verifying the release and only on a machine where you accept that risk.
 
 Obtaining Windows and Apple developer signing identities later is the only way to remove these warnings properly.

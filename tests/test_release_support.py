@@ -14,7 +14,7 @@ from release.support import (
     verify_release_directory,
     write_release_manifest,
 )
-from release.build_release import _write_launchers
+from release.build_release import GUI_NAME, MACOS_APP_NAME, _windows_pe_subsystem, _write_launchers
 
 
 def make_release(parent: Path) -> Path:
@@ -32,15 +32,33 @@ def make_release(parent: Path) -> Path:
 
 
 class ReleaseSupportTests(unittest.TestCase):
-    def test_windows_launcher_is_bom_free_and_requests_a_visible_window(self) -> None:
+    def test_windows_release_no_longer_uses_a_vbs_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _write_launchers(root, "windows-x86_64")
-            launcher = root / "High2Min Video Compressor.vbs"
-            contents = launcher.read_bytes()
-            self.assertTrue(contents.startswith(b"Set fso"))
-            self.assertFalse(contents.startswith(b"\xef\xbb\xbf"))
-            self.assertIn(b"shell.Run command, 1, False", contents)
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_macos_launchers_use_executables_inside_the_native_app(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_launchers(root, "macos-arm64")
+            ui = (root / "high2min-ui").read_text(encoding="utf-8")
+            cli = (root / "high2min").read_text(encoding="utf-8")
+            self.assertIn(f"{MACOS_APP_NAME}/Contents/MacOS/{GUI_NAME}", ui)
+            self.assertIn(f"{MACOS_APP_NAME}/Contents/MacOS/high2min", cli)
+            self.assertNotIn("python", ui.casefold())
+            self.assertNotIn("python", cli.casefold())
+
+    def test_windows_pe_subsystem_is_read_from_the_optional_header(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "app.exe"
+            value = bytearray(256)
+            value[:2] = b"MZ"
+            value[0x3C:0x40] = (128).to_bytes(4, "little")
+            value[128:132] = b"PE\0\0"
+            value[128 + 24 + 68:128 + 24 + 70] = (2).to_bytes(2, "little")
+            executable.write_bytes(value)
+            self.assertEqual(_windows_pe_subsystem(executable), 2)
 
     def test_platform_tags_are_stable(self) -> None:
         with patch("platform.system", return_value="Windows"), patch(

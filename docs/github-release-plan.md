@@ -5,7 +5,7 @@ This repository currently uses a certificate-free release path. GitHub builds ea
 ## Current certificate-free plan
 
 1. CI tests Windows, Linux, Apple Silicon macOS, and Intel macOS on standard GitHub-hosted runners.
-2. Pushing a matching version tag, such as `v0.8.0`, starts `.github/workflows/release.yml`.
+2. Pushing a matching version tag, such as `v0.8.1`, starts `.github/workflows/release.yml`.
 3. Each runner builds and smoke-tests its own binary archive. GitHub records a provenance attestation for the archive.
 4. A final job verifies all four internal manifests and SHA-256 sidecars, creates `SHA256SUMS.txt`, and opens a draft GitHub Release.
 5. The repository owner reviews the draft and manually publishes it. Anyone can then download it without a GitHub account from the Releases page.
@@ -55,21 +55,21 @@ Use a matrix in `.github/workflows/ci.yml`:
 
 | Target | GitHub-hosted runner | Required validation |
 |---|---|---|
-| Windows x86-64 | `windows-2025` | Unit tests, native Tk/TkDND UI smoke, icon, synthetic compression |
+| Windows x86-64 | `windows-2025` | Unit tests, GUI/console PE subsystem checks, native Tk/TkDND UI smoke, icon, synthetic compression |
 | Linux x86-64 | `ubuntu-24.04` | Unit tests, Xvfb Tk/TkDND UI smoke, synthetic compression |
-| macOS Apple Silicon | `macos-15` | Unit tests, native app/UI smoke, synthetic compression |
-| macOS Intel | `macos-15-intel` | Unit tests, native app/UI smoke, synthetic compression |
+| macOS Apple Silicon | `macos-15` | Unit tests, arm64 app architecture, strict nested code integrity, native app/UI smoke, synthetic compression |
+| macOS Intel | `macos-15-intel` | Unit tests, x86-64 app architecture, strict nested code integrity, native app/UI smoke, synthetic compression |
 
 Generate a small synthetic video during the workflow. This prevents copyrighted or pupil-book media from entering GitHub artifacts.
 
 ## Phase 3: signed release workflow
 
-Create `.github/workflows/release.yml`, triggered only by a protected semantic tag such as `v0.8.0` and an optional manual dispatch for release candidates.
+Create `.github/workflows/release.yml`, triggered only by a protected semantic tag such as `v0.8.1` and an optional manual dispatch for release candidates.
 
 1. Confirm that the tag, package version, changelog, and release title match.
 2. Run the complete native matrix again and build each archive with the existing builders.
-3. Windows: currently publish an unsigned native ZIP with a checksum and provenance attestation. If a signing identity is obtained later, sign `high2min.exe` and any installer with Azure Artifact Signing or an organization-owned Authenticode certificate before archiving.
-4. macOS: currently publish clearly labelled unsigned native archives with checksums and provenance. If an Apple Developer identity is obtained later, sign nested executables and the `.app`, submit it for notarization, staple the ticket, and validate it with Gatekeeper before packaging.
+3. Windows: currently publish an unsigned native ZIP containing a terminal-free desktop executable and a separate console CLI, with a checksum and provenance attestation. If a signing identity is obtained later, sign both executables and any installer with Azure Artifact Signing or an organization-owned Authenticode certificate before archiving.
+4. macOS: currently publish clearly labelled native `.app` archives with ad-hoc bundle-integrity signatures, checksums, and provenance. If an Apple Developer identity is obtained later, sign nested executables and the `.app`, submit it for notarization, staple the ticket, and validate it with Gatekeeper before packaging.
 5. Linux: verify executable permissions and archive manifest; add a Sigstore or organization GPG signature if policy requires it.
 6. Produce SHA-256 sidecars, `release-index-vVERSION.json`, CycloneDX or SPDX SBOMs, and GitHub build-provenance attestations.
 7. Upload per-platform workflow artifacts with short retention. A separate release job downloads and verifies them before creating one draft GitHub Release.
@@ -85,7 +85,7 @@ Create `.github/workflows/release.yml`, triggered only by a protected semantic t
 
 ## Publication checklist
 
-1. Publish `v0.8.0-rc.1` as a prerelease and test downloads on clean Windows, macOS Apple Silicon, macOS Intel, and Linux machines.
+1. Build `v0.8.1` as a draft release and test downloads on clean Windows, macOS Apple Silicon, macOS Intel, and Linux machines before publication.
 2. Confirm Windows signature/SmartScreen behavior and macOS Gatekeeper/notarization without bypass instructions.
 3. Verify every `.sha256`, internal release manifest, SBOM, and GitHub attestation from a clean machine.
 4. Perform an accessibility pass: keyboard navigation, screen-reader names, visible progress, drag-and-drop fallback, and cancellation/resume.

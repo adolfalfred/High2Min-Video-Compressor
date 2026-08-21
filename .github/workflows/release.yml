@@ -156,7 +156,9 @@ jobs:
 
           These archives were built and tested on native GitHub-hosted Windows, Linux, Apple Silicon macOS, and Intel macOS runners.
 
-          The binaries are not Authenticode- or Apple Developer ID-signed. Windows SmartScreen and macOS Gatekeeper warnings are therefore expected. Verify the matching SHA-256 file and GitHub provenance attestation before opening a downloaded archive.
+          Windows users can double-click **High2Min Video Compressor.exe** without opening a terminal. The separate **high2min.exe** remains available for command-line automation. macOS users receive a native architecture-matched **High2Min Video Compressor.app** rather than a shell wrapper around an external Python runtime.
+
+          The binaries are not Authenticode- or Apple Developer ID-signed. macOS bundles have ad-hoc integrity signatures, but Windows SmartScreen and macOS Gatekeeper publisher warnings are still expected. Verify the matching SHA-256 file and GitHub provenance attestation before opening a downloaded archive.
 
           Verify provenance with:
 

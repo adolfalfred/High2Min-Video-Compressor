@@ -36,6 +36,10 @@ Every build:
 - builds an onedir executable with the schemas and Tk runtime;
 - smoke-tests version, JSON contract, schemas, a real video when supplied, and the full desktop interface;
 - creates a deterministic ZIP on Windows or `.tar.gz` on Linux/macOS;
+- creates a terminal-free `High2Min Video Compressor.exe` beside the console-enabled
+  `high2min.exe` on Windows, both sharing one runtime;
+- creates the macOS `.app` directly with PyInstaller on the matching native architecture and
+  validates its nested ad-hoc signatures and Mach-O architecture;
 - validates every archive entry against `RELEASE-MANIFEST.json`;
 - writes a `.sha256` sidecar.
 
@@ -45,6 +49,11 @@ Verify any completed archive:
 python release/verify_release.py releases/High2Min-Video-Compressor-VERSION-PLATFORM.ARCHIVE
 ```
 
-macOS builds are unsigned. Internal users may need to approve the application in Privacy & Security. Public distribution should add Developer ID signing and notarization after the verified build and then regenerate its archive checksum.
+macOS builds are ad-hoc signed for internal bundle integrity but remain unsigned from Apple's
+publisher-trust perspective. Internal users may need to approve the application in Privacy &
+Security. Public distribution should add Developer ID signing and notarization after the verified
+native build and then regenerate its archive checksum.
 
-When no Mac builder is available, `build_portable_macos.py` can assemble Intel and Apple Silicon source-runtime releases from pinned python-build-standalone and imageio-ffmpeg assets. It verifies upstream SHA-256 values, Mach-O executables, bundled Tk files, the complete release manifest, and archive integrity. Because it cannot execute macOS binaries on another operating system, run `high2min --version`, `high2min verify --input page_1.mp4 --json`, and `high2min ui --smoke-test` on each Mac architecture before approval.
+macOS releases must be built on the matching native GitHub runner. Cross-built Python runtime
+archives are no longer accepted because they cannot execute, validate the complete `.app`, or
+reproduce Gatekeeper behavior before publication.

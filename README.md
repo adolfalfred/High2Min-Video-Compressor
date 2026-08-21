@@ -10,7 +10,9 @@ These certificate-free binaries are built on native GitHub-hosted runners and pu
 
 Maintainers can follow the [certificate-free release checklist](docs/release-checklist.md) to build and publish a new version.
 
-Version 0.8 uses the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages.
+Version 0.8.1 uses the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages.
+
+Windows releases provide a terminal-free `High2Min Video Compressor.exe` for desktop users and a separate console-enabled `high2min.exe` for Codex, Claude Code, scripts, and CI. Native macOS builds provide a real `.app` bundle with an architecture-matched embedded runtime; no separate Python installation is needed.
 
 The project is CLI-first: Codex, Claude Code, scripts, and CI systems can operate it without opening the desktop UI. The UI will call the same core engine.
 
@@ -65,7 +67,7 @@ Hard-size and adaptive-scale behavior are the CLI defaults. Use `--soft-size --n
 
 ## Portable releases
 
-Self-contained release archives are in `releases/` for Windows x86-64, Linux x86-64, macOS Apple Silicon, and macOS Intel. They include Python/runtime components where needed, the correct FFmpeg executable, schemas, UI launchers, license notices, a per-file release manifest, and an archive SHA-256 sidecar. See `releases/README.md` for verification status and launch instructions.
+Self-contained release archives are in `releases/` for Windows x86-64, Linux x86-64, macOS Apple Silicon, and macOS Intel. They include Python/runtime components where needed, the correct FFmpeg executable, schemas, native desktop launchers, the automation CLI, license notices, a per-file release manifest, and an archive SHA-256 sidecar. See `releases/README.md` for verification status and launch instructions.
 
 Reproducible native builders and the independent archive verifier are documented in `release/BUILDING.md`.
 

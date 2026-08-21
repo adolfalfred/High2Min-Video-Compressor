@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -28,11 +29,18 @@ from release.support import (  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = PROJECT_ROOT / "src"
-ENTRYPOINT = Path(__file__).resolve().parent / "entrypoint.py"
-ASSET_ROOT = SOURCE_ROOT / "adt_video_publisher" / "assets"
+SPEC_FILE = Path(__file__).resolve().parent / "high2min.spec"
+GUI_NAME = "High2Min Video Compressor"
+MACOS_APP_NAME = f"{GUI_NAME}.app"
 
 
-def _run(command: list[str], *, timeout: int = 600, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str],
+    *,
+    timeout: int = 600,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         capture_output=True,
@@ -41,6 +49,7 @@ def _run(command: list[str], *, timeout: int = 600, check: bool = True) -> subpr
         errors="replace",
         timeout=timeout,
         check=check,
+        env=env,
     )
 
 
@@ -87,55 +96,34 @@ def _copy_distribution_license(distribution_name: str, destination: Path) -> Non
 
 def _write_launchers(root: Path, target: str) -> None:
     if target.startswith("windows-"):
-        launcher = root / "High2Min Video Compressor.vbs"
-        launcher.write_text(
-            'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
-            'Set shell = CreateObject("WScript.Shell")\r\n'
-            'folder = fso.GetParentFolderName(WScript.ScriptFullName)\r\n'
-            'command = Chr(34) & folder & "\\high2min.exe" & Chr(34) & " ui"\r\n'
-            'shell.Run command, 1, False\r\n',
-            encoding="ascii",
-        )
         return
 
     launcher = root / "high2min-ui"
-    launcher.write_text(
-        "#!/bin/sh\n"
-        'APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
-        'exec "$APP_DIR/high2min" ui "$@"\n',
-        encoding="utf-8",
-    )
-    launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     if target.startswith("macos-"):
-        app = root / "High2Min Video Compressor.app" / "Contents"
-        executable = app / "MacOS" / "launcher"
-        executable.parent.mkdir(parents=True)
-        executable.write_text(
+        launcher.write_text(
             "#!/bin/sh\n"
-            'APP_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)\n'
-            'exec "$APP_ROOT/high2min" ui\n',
+            'APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
+            f'exec "$APP_DIR/{MACOS_APP_NAME}/Contents/MacOS/{GUI_NAME}" "$@"\n',
             encoding="utf-8",
         )
-        executable.chmod(executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        (app / "Info.plist").write_text(
-            """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleName</key><string>High2Min Video Compressor</string>
-<key>CFBundleDisplayName</key><string>High2Min Video Compressor</string>
-<key>CFBundleIdentifier</key><string>tz.go.tie.high2min-video-compressor</string>
-<key>CFBundleVersion</key><string>1</string>
-<key>CFBundleExecutable</key><string>launcher</string>
-<key>CFBundleIconFile</key><string>high2min-video-compressor.icns</string>
-<key>LSMinimumSystemVersion</key><string>11.0</string>
-<key>NSHighResolutionCapable</key><true/>
-</dict></plist>
-""",
+        cli_launcher = root / "high2min"
+        cli_launcher.write_text(
+            "#!/bin/sh\n"
+            'APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
+            f'exec "$APP_DIR/{MACOS_APP_NAME}/Contents/MacOS/high2min" "$@"\n',
             encoding="utf-8",
         )
-        resources = app / "Resources"
-        resources.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ASSET_ROOT / "high2min-video-compressor.icns", resources)
+        cli_launcher.chmod(
+            cli_launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+        )
+    else:
+        launcher.write_text(
+            "#!/bin/sh\n"
+            'APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
+            f'exec "$APP_DIR/{GUI_NAME}" "$@"\n',
+            encoding="utf-8",
+        )
+    launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def _write_release_documents(root: Path, *, target: str, ffmpeg: Path) -> dict[str, str]:
@@ -157,7 +145,7 @@ def _write_release_documents(root: Path, *, target: str, ffmpeg: Path) -> dict[s
         "ffmpeg": ffmpeg_version,
     }
     ui_instruction = (
-        "Double-click 'High2Min Video Compressor.vbs'."
+        "Double-click 'High2Min Video Compressor.exe'."
         if target.startswith("windows-")
         else "Run ./high2min-ui (or open the .app bundle on macOS)."
     )
@@ -187,70 +175,92 @@ def platform_python_version() -> str:
     return ".".join(str(part) for part in sys.version_info[:3])
 
 
-def _build_with_pyinstaller(ffmpeg: Path, target: str, temporary: Path) -> Path:
+def _build_with_pyinstaller(ffmpeg: Path, target: str, temporary: Path) -> tuple[Path, Path | None]:
     dist = temporary / "dist"
     work = temporary / "work"
-    spec = temporary / "spec"
-    destination = f"adt_video_publisher/bin/{target}"
     packaged_ffmpeg = temporary / ("ffmpeg.exe" if target.startswith("windows-") else "ffmpeg")
     shutil.copy2(ffmpeg, packaged_ffmpeg)
     if not target.startswith("windows-"):
         packaged_ffmpeg.chmod(
             packaged_ffmpeg.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
         )
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "HIGH2MIN_BUILD_FFMPEG": str(packaged_ffmpeg),
+            "HIGH2MIN_BUILD_TARGET": target,
+            "HIGH2MIN_BUILD_VERSION": _package_version(),
+        }
+    )
     command = [
         sys.executable,
         "-m",
         "PyInstaller",
         "--noconfirm",
         "--clean",
-        "--onedir",
-        "--console",
-        "--name",
-        "high2min",
         "--distpath",
         str(dist),
         "--workpath",
         str(work),
-        "--specpath",
-        str(spec),
-        "--icon",
-        str(
-            ASSET_ROOT / (
-                "high2min-video-compressor.ico"
-                if target.startswith("windows-")
-                else "high2min-video-compressor.icns"
-                if target.startswith("macos-")
-                else "high2min-video-compressor.png"
-            )
-        ),
-        "--paths",
-        str(SOURCE_ROOT),
-        "--collect-data",
-        "adt_video_publisher",
-        "--collect-all",
-        "tkinterdnd2",
-        "--add-data",
-        f"{SOURCE_ROOT / 'adt_video_publisher' / 'schemas'}{os.pathsep}adt_video_publisher/schemas",
-        "--hidden-import",
-        "tkinter",
-        "--hidden-import",
-        "tkinter.ttk",
-        "--hidden-import",
-        "tkinterdnd2",
-        "--add-binary",
-        f"{packaged_ffmpeg}{os.pathsep}{destination}",
-        str(ENTRYPOINT),
+        str(SPEC_FILE),
     ]
-    result = _run(command, timeout=1200, check=False)
+    result = _run(command, timeout=1200, check=False, env=environment)
     if result.returncode != 0:
         raise ReleaseValidationError(
             "PyInstaller failed:\n" + (result.stderr or result.stdout)[-6000:]
         )
-    built = dist / "high2min"
+    built = dist / GUI_NAME
     if not built.is_dir():
-        raise ReleaseValidationError("PyInstaller did not create the expected onedir release.")
-    return built
+        raise ReleaseValidationError("PyInstaller did not create the expected shared onedir release.")
+    app = dist / MACOS_APP_NAME if target.startswith("macos-") else None
+    if app is not None and not app.is_dir():
+        raise ReleaseValidationError("PyInstaller did not create the expected native macOS app bundle.")
+    return built, app
+
+
+def _windows_pe_subsystem(path: Path) -> int:
+    """Return IMAGE_OPTIONAL_HEADER.Subsystem without requiring build-only pefile at runtime."""
+
+    value = path.read_bytes()
+    if len(value) < 0x40 or value[:2] != b"MZ":
+        raise ReleaseValidationError(f"Windows executable has no valid DOS header: {path}")
+    pe_offset = struct.unpack_from("<I", value, 0x3C)[0]
+    optional_offset = pe_offset + 24
+    if value[pe_offset:pe_offset + 4] != b"PE\0\0" or len(value) < optional_offset + 70:
+        raise ReleaseValidationError(f"Windows executable has no valid PE header: {path}")
+    return struct.unpack_from("<H", value, optional_offset + 68)[0]
+
+
+def _verify_macos_bundle(app: Path, target: str) -> None:
+    expected_architecture = "arm64" if target.endswith("arm64") else "x86_64"
+    gui = app / "Contents" / "MacOS" / GUI_NAME
+    cli = app / "Contents" / "MacOS" / "high2min"
+    plist = app / "Contents" / "Info.plist"
+    for required in (gui, cli, plist):
+        if not required.is_file():
+            raise ReleaseValidationError(f"The native macOS app is incomplete: {required}")
+    for executable in (gui, cli):
+        architecture = _run(["lipo", "-archs", str(executable)], timeout=30, check=False)
+        values = architecture.stdout.split()
+        if architecture.returncode != 0 or expected_architecture not in values:
+            raise ReleaseValidationError(
+                f"The macOS executable has the wrong architecture ({executable}): "
+                f"{architecture.stdout}{architecture.stderr}"
+            )
+    # PyInstaller applies ad-hoc signatures when no Developer ID is configured. Re-sign the
+    # complete bundle after all local mutations, then verify nested code integrity strictly.
+    signed = _run(["codesign", "--force", "--deep", "--sign", "-", str(app)], timeout=180, check=False)
+    if signed.returncode != 0:
+        raise ReleaseValidationError(f"Ad-hoc macOS signing failed:\n{signed.stdout}\n{signed.stderr}")
+    verified = _run(
+        ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)],
+        timeout=180,
+        check=False,
+    )
+    if verified.returncode != 0:
+        raise ReleaseValidationError(
+            f"macOS bundle integrity validation failed:\n{verified.stdout}\n{verified.stderr}"
+        )
 
 
 def _smoke_release(root: Path, target: str, smoke_video: str | None, skip_ui: bool) -> None:
@@ -262,8 +272,20 @@ def _smoke_release(root: Path, target: str, smoke_video: str | None, skip_ui: bo
     ]
     if smoke_video:
         checks.append([str(executable), "verify", "--input", str(Path(smoke_video).resolve()), "--json"])
+    if target.startswith("windows-"):
+        desktop = root / f"{GUI_NAME}.exe"
+        if _windows_pe_subsystem(desktop) != 2:
+            raise ReleaseValidationError("The Windows desktop executable is not terminal-free.")
+        if _windows_pe_subsystem(executable) != 3:
+            raise ReleaseValidationError("The Windows automation executable is not console-enabled.")
+    elif target.startswith("macos-"):
+        desktop = root / MACOS_APP_NAME / "Contents" / "MacOS" / GUI_NAME
+    else:
+        desktop = root / GUI_NAME
+    if not desktop.is_file():
+        raise ReleaseValidationError(f"Desktop executable is missing: {desktop}")
     if not skip_ui:
-        checks.append([str(executable), "ui", "--smoke-test"])
+        checks.append([str(desktop), "--smoke-test"])
     for command in checks:
         result = _run(command, timeout=180, check=False)
         if result.returncode != 0:
@@ -290,9 +312,15 @@ def build_release(arguments: argparse.Namespace) -> dict[str, object]:
 
     with tempfile.TemporaryDirectory(prefix="high2min-release-") as temporary_name:
         temporary = Path(temporary_name)
-        built = _build_with_pyinstaller(ffmpeg, target, temporary)
+        built, app = _build_with_pyinstaller(ffmpeg, target, temporary)
         root = temporary / release_name
-        built.replace(root)
+        if target.startswith("macos-"):
+            root.mkdir()
+            assert app is not None
+            app.replace(root / MACOS_APP_NAME)
+            _verify_macos_bundle(root / MACOS_APP_NAME, target)
+        else:
+            built.replace(root)
         _write_launchers(root, target)
         dependencies = _write_release_documents(root, target=target, ffmpeg=ffmpeg)
         write_release_manifest(

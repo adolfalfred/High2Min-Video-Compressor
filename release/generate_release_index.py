@@ -53,6 +53,7 @@ def generate(directory: Path) -> tuple[Path, Path, dict[str, object]]:
                 "native_execution_verified": True,
                 "ui_smoke_verified": True,
                 "code_signed": False,
+                "bundle_integrity_signature": "ad-hoc" if target.startswith("macos-") else "none",
             }
         )
     if versions == set() or len(versions) != 1:

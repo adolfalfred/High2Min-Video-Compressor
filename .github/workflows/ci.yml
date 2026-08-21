@@ -80,3 +80,66 @@ jobs:
       - name: Test Windows and macOS desktop UI
         if: runner.os != 'Linux'
         run: python -m adt_video_publisher ui --smoke-test
+
+  package:
+    name: Package (${{ matrix.target }})
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x86_64
+            runner: windows-2025
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+          - target: macos-arm64
+            runner: macos-15
+          - target: macos-x86_64
+            runner: macos-15-intel
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes python3-venv python3-tk xvfb libx11-6 libxft2 libxss1
+
+      - name: Build and test Windows desktop and CLI archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          & .\release\build-current.ps1
+          -Python python
+          -Output (Join-Path $env:RUNNER_TEMP 'high2min-release')
+
+      - name: Build and test Linux desktop and CLI archive
+        if: runner.os == 'Linux'
+        run: >-
+          xvfb-run -a env
+          OUTPUT="$RUNNER_TEMP/high2min-release"
+          PYTHON=/usr/bin/python3
+          bash release/build-current.sh
+
+      - name: Build and test native macOS app and CLI archive
+        if: runner.os == 'macOS'
+        run: >-
+          env
+          OUTPUT="$RUNNER_TEMP/high2min-release"
+          PYTHON=python3
+          bash release/build-current.sh
+
+      - name: Verify packaged artifact contract
+        run: >-
+          python release/ci_release_artifact.py
+          --directory "${{ runner.temp }}/high2min-release"
+          --target "${{ matrix.target }}"
