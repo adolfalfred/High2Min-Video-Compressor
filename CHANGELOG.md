@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.5 - 2026-08-21
+
+- Check the latest public GitHub release in a background thread when the desktop app starts.
+- Prompt users to open the verified release page when a newer stable version is available.
+- Cache successful automatic checks for 24 hours and keep offline startup silent.
+- Add a manual **Check for updates** button for immediate checks and visible connection errors.
+
 ## 0.8.4 - 2026-08-21
 
 - Recover valid ADT runtime bundles omitted from older `imsmanifest.xml` files.

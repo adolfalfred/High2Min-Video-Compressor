@@ -6,9 +6,11 @@ import os
 import queue
 import sys
 import threading
+import webbrowser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from . import __version__
 from .batch import BatchRunResult
 from .desktop_controller import (
     AnalysisSummary,
@@ -22,6 +24,7 @@ from .desktop_controller import (
 from .errors import AdtVideoError, InvalidInputError
 from .paths import SUPPORTED_VIDEO_EXTENSIONS
 from .publishing import PublishResult
+from .updates import UpdateInfo, check_for_update
 
 
 def _format_bytes(value: int) -> str:
@@ -39,7 +42,13 @@ def _application_icon() -> Path:
     return Path(__file__).resolve().parent / "assets" / "high2min-video-compressor.png"
 
 
-def create_application(root: Any, controller: DesktopController | None = None) -> Any:
+def create_application(
+    root: Any,
+    controller: DesktopController | None = None,
+    *,
+    update_checker: Callable[..., UpdateInfo | None] = check_for_update,
+    auto_check_updates: bool = True,
+) -> Any:
     """Build the UI on an existing Tk root; kept separate for smoke testing."""
 
     import tkinter as tk
@@ -55,6 +64,8 @@ def create_application(root: Any, controller: DesktopController | None = None) -
             self.active_kind = ""
             self.close_requested = False
             self.completed_items = 0
+            self.update_checker = update_checker
+            self.update_check_running = False
 
             root.title("High2Min Video Compressor")
             root.minsize(860, 700)
@@ -103,6 +114,8 @@ def create_application(root: Any, controller: DesktopController | None = None) -
             root.bind("<Control-Shift-O>", lambda _event: self.choose_source_file())
             root.bind("<Control-r>", lambda _event: self.resume_job())
             root.after(100, self._poll_messages)
+            if auto_check_updates:
+                root.after(750, lambda: self._start_update_check(manual=False))
 
         def _build(self, ttk: Any, tk: Any) -> None:
             style = ttk.Style(self.root)
@@ -118,6 +131,7 @@ def create_application(root: Any, controller: DesktopController | None = None) -
 
             heading = ttk.Frame(main)
             heading.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 12))
+            heading.columnconfigure(0, weight=1)
             ttk.Label(heading, text="High2Min Video Compressor", style="Title.TLabel").grid(
                 row=0, column=0, sticky="w"
             )
@@ -126,6 +140,12 @@ def create_application(root: Any, controller: DesktopController | None = None) -
                 text="Compress silent page videos, verify quality, and publish them safely into an ADT book.",
                 style="Muted.TLabel",
             ).grid(row=1, column=0, sticky="w", pady=(3, 0))
+            self.update_button = ttk.Button(
+                heading,
+                text="Check for updates",
+                command=lambda: self._start_update_check(manual=True),
+            )
+            self.update_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
 
             notebook = ttk.Notebook(main)
             notebook.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10))
@@ -606,10 +626,84 @@ def create_application(root: Any, controller: DesktopController | None = None) -
                         self._handle_done(value)
                     elif kind == "error":
                         self._handle_error(value)
+                    elif kind == "update_result":
+                        self._handle_update_result(value)
+                    elif kind == "update_error":
+                        self._handle_update_error(value)
             except queue.Empty:
                 pass
             if self.root.winfo_exists():
                 self.root.after(100, self._poll_messages)
+
+        def _start_update_check(self, *, manual: bool) -> None:
+            if self.update_check_running:
+                if manual:
+                    messagebox.showinfo(
+                        "Update check in progress",
+                        "High2Min is already checking for updates.",
+                        parent=self.root,
+                    )
+                return
+            self.update_check_running = True
+            self.update_button.configure(state="disabled")
+
+            def runner() -> None:
+                try:
+                    result = self.update_checker(force=manual)
+                except Exception as exc:
+                    self.messages.put(("update_error", (exc, manual)))
+                else:
+                    self.messages.put(("update_result", (result, manual)))
+
+            threading.Thread(
+                target=runner,
+                name="high2min-update-check",
+                daemon=True,
+            ).start()
+
+        def _finish_update_check(self) -> None:
+            self.update_check_running = False
+            if self.root.winfo_exists():
+                self.update_button.configure(state="normal")
+
+        def _handle_update_result(self, value: object) -> None:
+            result, manual = value  # type: ignore[misc]
+            self._finish_update_check()
+            if result is None:
+                if manual:
+                    messagebox.showinfo(
+                        "High2Min is up to date",
+                        f"Version {__version__} is the latest published version.",
+                        parent=self.root,
+                    )
+                return
+
+            should_open = messagebox.askyesno(
+                "High2Min update available",
+                (
+                    f"Version {result.latest_version} is available. "
+                    f"You currently have version {result.current_version}.\n\n"
+                    "Open the verified GitHub release page to download it?"
+                ),
+                parent=self.root,
+            )
+            if should_open:
+                try:
+                    opened = webbrowser.open_new_tab(result.release_url)
+                except Exception:
+                    opened = False
+                if not opened:
+                    messagebox.showinfo(
+                        "Open the update page",
+                        f"Open this address in your browser:\n\n{result.release_url}",
+                        parent=self.root,
+                    )
+
+        def _handle_update_error(self, value: object) -> None:
+            error, manual = value  # type: ignore[misc]
+            self._finish_update_check()
+            if manual:
+                messagebox.showerror("Update check failed", str(error), parent=self.root)
 
         def _handle_progress(self, value: object) -> None:
             _job_id, event, payload = value  # type: ignore[misc]
@@ -792,7 +886,7 @@ def smoke_test() -> int:
 
         root = TkinterDnD.Tk()
         root.withdraw()
-        application = create_application(root)
+        application = create_application(root, auto_check_updates=False)
         root.update_idletasks()
         if application.publish_button.cget("text") != "Update ADT website":
             raise RuntimeError("Publishing controls were not created.")

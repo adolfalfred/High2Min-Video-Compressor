@@ -30,12 +30,15 @@ The interface creates compressed copies in a separate destination and never repl
 - saved-job resume and links to JSON/CSV report locations.
 - separate compression and publishing tabs;
 - ADT website selection, optional language selection, and transactional in-place video publishing.
+- a throttled background update check plus a manual **Check for updates** button.
 
 ADT publishing uses the compressed-copy folder as its authoritative input and updates the selected website itself. It validates a staged production copy before changing the repo, recovers valid runtime bundles omitted from older manifests, enables and verifies the hand-sign video control, refreshes generated offline-preloader data and cache versions, and removes the runtime's mutual-pausing behavior so voice-over narration and sign-language video can play together. It replaces only the chosen language's videos and mapping plus generated config, compatible runtime bundles, the preloader, affected HTML, and manifest files, preserves development files, increments the bundle version, and restores the original ADT assets if final validation fails. The desktop publishing step never creates, replaces, or modifies a ZIP package.
 
 Resource-analysis failures show disk requirements in MB. When all compression items fail before producing output, the interface removes temporary state and report files and reports that cleanup instead of leaving a resumable job that cannot contain completed work.
 
 On Windows, FFmpeg and FFprobe run without visible child console windows. Error and completion information remains available in the interface's status and activity log.
+
+At startup, the desktop app checks the latest public stable GitHub release without blocking the interface. A successful automatic check is cached for 24 hours. If a newer version exists, the app asks before opening the verified GitHub release page; it does not download or replace binaries by itself. Network failures stay silent during startup but are shown after a manual update check.
 
 Keyboard shortcuts:
 
