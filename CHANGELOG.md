@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.10.0 - Unreleased
+## 0.10.0 - 2026-08-22
 
 - Reserve the next development version for flexible number-based video ordering and verified in-app platform downloads.
 - Document the safety, platform-selection, progress, cancellation, integrity-verification, and regression-test requirements before implementation.
