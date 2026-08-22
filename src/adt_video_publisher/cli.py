@@ -36,6 +36,7 @@ from .errors import (
     ProbeFailedError,
     ProbeUnavailableError,
     PublishFailedError,
+    PublishingInterruptedError,
     ResourceLimitError,
     UnsafePathError,
     ValidationFailedError,
@@ -282,6 +283,8 @@ def _error_exit_code(error: BaseException) -> ExitCode:
         return ExitCode.ENCODING_FAILED
     if isinstance(error, PublishFailedError):
         return ExitCode.PUBLISH_FAILED
+    if isinstance(error, PublishingInterruptedError):
+        return ExitCode.INTERRUPTED
     if isinstance(error, ValidationFailedError):
         return ExitCode.VALIDATION_FAILED
     if isinstance(error, KeyboardInterrupt):

@@ -5,7 +5,7 @@ This repository currently uses a certificate-free release path. GitHub builds ea
 ## Current certificate-free plan
 
 1. CI tests Windows, Linux, Apple Silicon macOS, and Intel macOS on standard GitHub-hosted runners.
-2. Pushing a matching version tag, such as `v0.8.5`, starts `.github/workflows/release.yml`.
+2. Pushing a matching version tag, such as `v0.9.0`, starts `.github/workflows/release.yml`.
 3. Each runner builds and smoke-tests its own binary archive. GitHub records a provenance attestation for the archive.
 4. A final job verifies all four internal manifests and SHA-256 sidecars, creates `SHA256SUMS.txt`, and opens a draft GitHub Release.
 5. The repository owner reviews the draft and manually publishes it. Anyone can then download it without a GitHub account from the Releases page.
@@ -64,7 +64,7 @@ Generate a small synthetic video during the workflow. This prevents copyrighted 
 
 ## Phase 3: signed release workflow
 
-Create `.github/workflows/release.yml`, triggered only by a protected semantic tag such as `v0.8.5` and an optional manual dispatch for release candidates.
+Create `.github/workflows/release.yml`, triggered only by a protected semantic tag such as `v0.9.0` and an optional manual dispatch for release candidates.
 
 1. Confirm that the tag, package version, changelog, and release title match.
 2. Run the complete native matrix again and build each archive with the existing builders.
@@ -85,7 +85,7 @@ Create `.github/workflows/release.yml`, triggered only by a protected semantic t
 
 ## Publication checklist
 
-1. Build `v0.8.5` as a draft release and test downloads on clean Windows, macOS Apple Silicon, macOS Intel, and Linux machines before publication.
+1. Build `v0.9.0` as a draft release and test downloads on clean Windows, macOS Apple Silicon, macOS Intel, and Linux machines before publication.
 2. Confirm Windows signature/SmartScreen behavior and macOS Gatekeeper/notarization without bypass instructions.
 3. Verify every `.sha256`, internal release manifest, SBOM, and GitHub attestation from a clean machine.
 4. Perform an accessibility pass: keyboard navigation, screen-reader names, visible progress, drag-and-drop fallback, and cancellation/resume.
@@ -97,7 +97,7 @@ Create `.github/workflows/release.yml`, triggered only by a protected semantic t
 - Separate Intel and Apple Silicon macOS archives are easier to test and diagnose than a universal bundle; reconsider a universal DMG after stable native CI.
 - Cloud Windows signing is operationally safer than exporting a PFX, but it requires Azure identity setup and service cost.
 - GitHub-hosted native builds provide clean, reproducible environments; self-hosted runners are justified only for hardware signing or capacity requirements and need stronger isolation.
-- Keep binary self-replacement deferred until code signing is available. Version 0.8.5 only detects newer public releases and asks before opening their verified GitHub page.
+- Keep binary self-replacement deferred until code signing is available. Version 0.9.0 only detects newer public releases and asks before opening their verified GitHub page.
 - Defer Windows ARM64, Linux ARM64, Homebrew, WinGet, and package installers until the four core artifacts have a stable, signed release process.
 
 ## Authoritative references

@@ -37,3 +37,7 @@ class ResourceLimitError(AdtVideoError):
 
 class PublishFailedError(AdtVideoError):
     """Raised when an ADT website or deployment package cannot be published safely."""
+
+
+class PublishingInterruptedError(AdtVideoError):
+    """Raised when ADT publishing is cancelled before the commit phase."""

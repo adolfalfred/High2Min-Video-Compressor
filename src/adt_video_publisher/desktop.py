@@ -6,6 +6,8 @@ import os
 import queue
 import sys
 import threading
+import time
+import uuid
 import webbrowser
 from pathlib import Path
 from typing import Any, Callable
@@ -21,7 +23,8 @@ from .desktop_controller import (
     parse_workers,
     suggested_output,
 )
-from .errors import AdtVideoError, InvalidInputError
+from .diagnostics import new_publish_log_path
+from .errors import AdtVideoError, InvalidInputError, PublishingInterruptedError
 from .paths import SUPPORTED_VIDEO_EXTENSIONS
 from .publishing import PublishResult
 from .updates import UpdateInfo, check_for_update
@@ -64,8 +67,13 @@ def create_application(
             self.active_kind = ""
             self.close_requested = False
             self.completed_items = 0
+            self.last_publish_phase = ""
             self.update_checker = update_checker
             self.update_check_running = False
+            self.active_diagnostic_log: Path | None = None
+            self.last_progress_at = time.monotonic()
+            self.last_stall_notice_at = 0.0
+            self.last_publish_message = ""
 
             root.title("High2Min Video Compressor")
             root.minsize(860, 700)
@@ -114,6 +122,7 @@ def create_application(
             root.bind("<Control-Shift-O>", lambda _event: self.choose_source_file())
             root.bind("<Control-r>", lambda _event: self.resume_job())
             root.after(100, self._poll_messages)
+            root.after(1000, self._check_stalled_task)
             if auto_check_updates:
                 root.after(750, lambda: self._start_update_check(manual=False))
 
@@ -553,13 +562,19 @@ def create_application(
                     recursive=self.recursive_var.get(),
                     maximum_bytes=mebibytes_to_bytes(self.maximum_size_var.get()),
                     probe_path=self.ffmpeg_var.get().strip() or None,
+                    diagnostic_log=str(new_publish_log_path(uuid.uuid4().hex)),
                 )
             except AdtVideoError as exc:
                 messagebox.showerror("Cannot publish", str(exc), parent=self.root)
                 return
+            self.active_diagnostic_log = Path(settings.diagnostic_log) if settings.diagnostic_log else None
             self._start_task(
                 "publishing",
-                lambda: self.controller.publish(settings, progress_callback=self._queue_progress),
+                lambda: self.controller.publish(
+                    settings,
+                    cancel_event=self.cancel_event,
+                    progress_callback=self._queue_progress,
+                ),
             )
 
         def resume_job(self) -> None:
@@ -595,6 +610,10 @@ def create_application(
             self.active_kind = kind
             self.cancel_event = threading.Event()
             self.completed_items = 0
+            self.last_publish_phase = ""
+            self.last_progress_at = time.monotonic()
+            self.last_stall_notice_at = 0.0
+            self.last_publish_message = ""
             self.progress_var.set(0)
             self.current_progress_var.set(0)
             self.overall_progress_text_var.set("Overall progress: 0%")
@@ -707,6 +726,7 @@ def create_application(
 
         def _handle_progress(self, value: object) -> None:
             _job_id, event, payload = value  # type: ignore[misc]
+            self.last_progress_at = time.monotonic()
             if event == "job_started":
                 total = max(1, int(payload.get("total", 1)))
                 self.progress_var.set(0)
@@ -715,6 +735,26 @@ def create_application(
                 self.status_var.set(f"Processing {total} video(s) — 0% complete…")
             elif event == "item_progress":
                 percent = max(0.0, min(100.0, float(payload.get("percent", 0))))
+                if payload.get("kind") == "publishing":
+                    phase = str(payload.get("phase", "publishing"))
+                    message = str(payload.get("message", "Publishing ADT website"))
+                    current = str(payload.get("current", "")).strip()
+                    self.progress_var.set(percent)
+                    self.current_progress_var.set(percent)
+                    self.overall_progress_text_var.set(f"Publishing progress: {percent:.1f}%")
+                    self.current_progress_text_var.set(
+                        f"{message}: {current}" if current else message
+                    )
+                    self.status_var.set(f"{message} — {percent:.1f}%")
+                    self.last_publish_message = (
+                        f"{message}: {current}" if current else message
+                    )
+                    cancellable = payload.get("cancellable") is not False
+                    self.cancel_button.configure(state="normal" if cancellable else "disabled")
+                    if phase != self.last_publish_phase:
+                        self._append_log(f"Publishing phase: {phase.replace('_', ' ')}.")
+                        self.last_publish_phase = phase
+                    return
                 source = Path(str(payload.get("source", "video"))).name
                 attempt = int(payload.get("attempt", 1))
                 phase = str(payload.get("phase", "encoding"))
@@ -727,6 +767,11 @@ def create_application(
                     f"{source}: {phase_text} — {percent:.1f}%"
                 )
             elif event in {"item_completed", "item_failed"}:
+                if self.active_kind == "publishing":
+                    source = Path(str(payload.get("source", "video"))).name
+                    status = str(payload.get("status", "staged"))
+                    self._append_log(f"{source}: {status}")
+                    return
                 self.completed_items += 1
                 total = getattr(self, "_progress_maximum", max(1, self.completed_items))
                 overall_percent = min(100.0, self.completed_items / total * 100)
@@ -750,6 +795,23 @@ def create_application(
                 )
             elif event in {"job_completed", "job_interrupted"}:
                 self._append_log(event.replace("_", " ").capitalize() + ".")
+
+        def _check_stalled_task(self) -> None:
+            if self.busy and self.active_kind == "publishing":
+                now = time.monotonic()
+                idle_seconds = now - self.last_progress_at
+                if idle_seconds >= 30 and now - self.last_stall_notice_at >= 30:
+                    current = self.last_publish_message or "the current publishing phase"
+                    self.status_var.set(
+                        f"Waiting on {current}. No progress for {int(idle_seconds)} seconds; "
+                        "the selected filesystem may be slow or unavailable."
+                    )
+                    self._append_log(
+                        f"No publishing progress for {int(idle_seconds)} seconds while waiting on: {current}."
+                    )
+                    self.last_stall_notice_at = now
+            if self.root.winfo_exists():
+                self.root.after(1000, self._check_stalled_task)
 
         def _handle_done(self, value: object) -> None:
             if isinstance(value, AnalysisSummary):
@@ -800,12 +862,25 @@ def create_application(
                     f"Bundle version: {value.bundle_version}. No ZIP package was changed."
                 )
                 self._append_log(f"Updated ADT website in place: {value.output_book}")
+                if value.diagnostic_log:
+                    self._append_log(f"Publishing diagnostic log: {value.diagnostic_log}")
             self._finish_task()
 
         def _handle_error(self, value: object) -> None:
             message = str(value)
+            if isinstance(value, PublishingInterruptedError):
+                self.status_var.set(message)
+                self._append_log(message)
+                if self.active_diagnostic_log:
+                    self._append_log(f"Publishing diagnostic log: {self.active_diagnostic_log}")
+                messagebox.showinfo("Publishing stopped safely", message, parent=self.root)
+                self._finish_task()
+                return
             self.status_var.set(f"Task failed: {message}")
             self._append_log(f"Error: {message}")
+            if self.active_kind == "publishing" and self.active_diagnostic_log:
+                self._append_log(f"Publishing diagnostic log: {self.active_diagnostic_log}")
+                message = f"{message}\n\nDiagnostic log:\n{self.active_diagnostic_log}"
             messagebox.showerror("High2Min Video Compressor", message, parent=self.root)
             self._finish_task()
 
@@ -826,7 +901,7 @@ def create_application(
             ):
                 button.configure(state=normal)
             self.cancel_button.configure(
-                state="normal" if busy and self.active_kind in {"compression", "resume"} else "disabled"
+                state="normal" if busy and self.active_kind in {"compression", "resume", "publishing"} else "disabled"
             )
 
         def cancel(self) -> None:
@@ -834,9 +909,14 @@ def create_application(
                 return
             self.cancel_event.set()
             self.cancel_button.configure(state="disabled")
-            self.status_var.set(
-                "Stop requested. Current encodes will finish safely; videos not yet started will be skipped."
-            )
+            if self.active_kind == "publishing":
+                self.status_var.set(
+                    "Stop requested. Publishing will stop before the repository transaction begins."
+                )
+            else:
+                self.status_var.set(
+                    "Stop requested. Current encodes will finish safely; videos not yet started will be skipped."
+                )
             self._append_log("Safe stop requested.")
 
         def _append_log(self, message: str) -> None:

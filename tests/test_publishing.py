@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
@@ -10,7 +11,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
-from adt_video_publisher.errors import InvalidInputError, PublishFailedError, ResourceLimitError
+from adt_video_publisher.errors import (
+    InvalidInputError,
+    PublishFailedError,
+    PublishingInterruptedError,
+    ResourceLimitError,
+)
+from adt_video_publisher import publishing
 from adt_video_publisher.publishing import (
     ADLCP_NAMESPACE,
     IMS_NAMESPACE,
@@ -121,6 +128,170 @@ def read_offline_inline(preloader: Path) -> dict[str, object]:
 
 
 class PublishingTests(unittest.TestCase):
+    def test_in_place_publish_stages_only_files_that_can_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            static = book / "assets" / "large-static-data.bin"
+            static.write_bytes(b"unchanged" * 1000)
+            for index in range(300):
+                path = book / "assets" / "static" / f"item-{index:04d}.bin"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(f"item-{index}".encode("ascii"))
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            copied_sources: list[Path] = []
+            actual_copy = publishing._copy_file
+
+            def record_copy(source: Path, destination: Path) -> None:
+                copied_sources.append(source)
+                actual_copy(source, destination)
+
+            with patch("adt_video_publisher.publishing._copy_file", side_effect=record_copy):
+                publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            self.assertNotIn(static, copied_sources)
+            self.assertFalse(any("static" in path.parts for path in copied_sources))
+            self.assertEqual(static.read_bytes(), b"unchanged" * 1000)
+            self.assertIn("assets/large-static-data.bin", declared_manifest_files(book / "imsmanifest.xml"))
+
+    def test_publish_progress_is_monotonic_and_reports_real_final_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement" * 200_000)
+            phases: list[tuple[str, float]] = []
+
+            def progress(_job: str, event: str, payload: dict[str, object]) -> None:
+                if event == "item_progress" and payload.get("kind") == "publishing":
+                    phases.append((str(payload["phase"]), float(payload["percent"])))
+
+            publish_adt(
+                videos,
+                book=book,
+                in_place=True,
+                validate_media=False,
+                progress_callback=progress,
+            )
+
+            percentages = [percent for _phase, percent in phases]
+            self.assertEqual(percentages, sorted(percentages))
+            self.assertEqual(percentages[-1], 100)
+            names = {phase for phase, _percent in phases}
+            self.assertTrue({"preflight", "staging", "commit", "final_validation", "cleanup", "completed"}.issubset(names))
+
+    def test_publish_can_be_cancelled_before_repository_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement" * 200_000)
+            before = hash_tree(book)
+            cancellation = threading.Event()
+
+            def progress(_job: str, event: str, payload: dict[str, object]) -> None:
+                if (
+                    event == "item_progress"
+                    and payload.get("kind") == "publishing"
+                    and float(payload.get("percent", 0)) >= 25
+                ):
+                    cancellation.set()
+
+            with self.assertRaises(PublishingInterruptedError):
+                publish_adt(
+                    videos,
+                    book=book,
+                    in_place=True,
+                    validate_media=False,
+                    cancel_event=cancellation,
+                    progress_callback=progress,
+                )
+
+            self.assertEqual(hash_tree(book), before)
+            self.assertEqual(list(root.glob(".*.adt-publish-*")), [])
+
+    def test_publish_recovers_an_interrupted_rename_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            original_config = (book / "assets" / "config.json").read_bytes()
+            stage = root / f".{book.name}.adt-publish-recovery.tmp"
+            backup = root / f".{book.name}.adt-publish-recovery.backup"
+            (backup / "assets").mkdir(parents=True)
+            stage.mkdir()
+            (book / "assets" / "config.json").replace(backup / "assets" / "config.json")
+            (backup / "transaction.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "transaction_id": "recovery",
+                        "status": "committing",
+                        "book": str(book.resolve()),
+                        "stage": str(stage.resolve()),
+                        "language": "en-GB",
+                        "targets": [
+                            {"relative": "assets/config.json", "had_original": True}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            self.assertNotEqual((book / "assets" / "config.json").read_bytes(), original_config)
+            self.assertFalse(stage.exists())
+            self.assertFalse(backup.exists())
+            self.assertEqual(validate_adt_website(book, allow_unmanifested=True)["video_count"], 1)
+
+    def test_publish_writes_durable_phase_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            log = root / "logs" / "publish.jsonl"
+
+            result = publish_adt(
+                videos,
+                book=book,
+                in_place=True,
+                validate_media=False,
+                diagnostic_log=log,
+            )
+
+            self.assertEqual(result.diagnostic_log, log.resolve())
+            events = [json.loads(line)["event"] for line in log.read_text(encoding="utf-8").splitlines()]
+            self.assertIn("phase", events)
+            self.assertEqual(events[-1], "job_completed")
+
+    def test_permission_preflight_fails_before_repository_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            before = hash_tree(book)
+
+            with patch(
+                "adt_video_publisher.publishing._atomic_write_probe",
+                side_effect=PublishFailedError("simulated read-only repository"),
+            ):
+                with self.assertRaisesRegex(PublishFailedError, "read-only"):
+                    publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            self.assertEqual(hash_tree(book), before)
+
     def test_publish_low_disk_error_uses_megabytes_without_changing_book(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -347,7 +518,7 @@ class PublishingTests(unittest.TestCase):
             def fail_final_validation(*args: object, **kwargs: object) -> dict[str, object]:
                 nonlocal validation_calls
                 validation_calls += 1
-                if validation_calls == 2:
+                if validation_calls == 1:
                     raise PublishFailedError("simulated final validation failure")
                 return actual_validator(*args, **kwargs)  # type: ignore[arg-type]
 

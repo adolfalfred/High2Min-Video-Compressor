@@ -16,6 +16,7 @@ from .compression import (
     DEFAULT_PRESET,
     DEFAULT_STRICT_SIZE,
 )
+from .diagnostics import DiagnosticLog
 from .errors import InvalidInputError
 from .paths import BatchPathPlan, build_path_plan
 from .planning import DEFAULT_MAXIMUM_BYTES
@@ -51,6 +52,7 @@ class DesktopPublishSettings:
     recursive: bool = False
     maximum_bytes: int = DEFAULT_MAXIMUM_BYTES
     probe_path: str | None = None
+    diagnostic_log: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,20 +185,30 @@ class DesktopController:
         self,
         settings: DesktopPublishSettings,
         *,
+        cancel_event: threading.Event | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> PublishResult:
-        return self.publisher(
-            settings.videos,
-            book=settings.book,
-            output=settings.output,
-            package=settings.package or None,
-            in_place=settings.in_place,
-            language=settings.language or None,
-            recursive=settings.recursive,
-            maximum_bytes=settings.maximum_bytes,
-            probe_path=settings.probe_path,
-            progress_callback=progress_callback,
-        )
+        try:
+            return self.publisher(
+                settings.videos,
+                book=settings.book,
+                output=settings.output,
+                package=settings.package or None,
+                in_place=settings.in_place,
+                language=settings.language or None,
+                recursive=settings.recursive,
+                maximum_bytes=settings.maximum_bytes,
+                probe_path=settings.probe_path,
+                cancel_event=cancel_event,
+                diagnostic_log=settings.diagnostic_log,
+                progress_callback=progress_callback,
+            )
+        except BaseException as exc:
+            DiagnosticLog(settings.diagnostic_log).write(
+                "desktop_publish_failed",
+                {"error_type": type(exc).__name__, "error": str(exc)},
+            )
+            raise
 
 
 def suggested_output(source: str) -> str:

@@ -157,8 +157,9 @@ def _write_release_documents(root: Path, *, target: str, ffmpeg: Path) -> dict[s
         "CLI: run high2min --help (high2min.exe on Windows).\n\n"
         "Recommended ADT defaults: CRF 35, medium preset, a hard 5 MiB maximum, adaptive "
         "proportional scaling only when needed, and SSIM quality validation.\n\n"
-        "No Python or system FFmpeg installation is required. The application creates copies and "
-        "refuses to overwrite source videos or source ADT websites.\n",
+        "No Python or system FFmpeg installation is required. Compression never overwrites source "
+        "videos. Publish ADT updates only the website explicitly selected by the user and protects "
+        "it with staged validation, rollback, and recovery.\n",
         encoding="utf-8",
     )
     (root / "THIRD-PARTY-NOTICES.txt").write_text(

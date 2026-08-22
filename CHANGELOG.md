@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0 - 2026-08-22
+
+- Replace full-site in-place ADT staging with a minimal overlay containing only videos and generated files.
+- Add writable create/rename/delete preflight checks and storage estimates based on the actual staged transaction.
+- Commit repository changes with same-filesystem renames and a durable recovery journal instead of copying the old video directory.
+- Restore interrupted transactions automatically and retain rollback protection through final ADT validation.
+- Report real preflight, validation, staging, runtime, offline-cache, commit, final-validation, and cleanup progress.
+- Copy and hash videos in one chunked pass with safe cancellation before the repository transaction begins.
+- Detect stalled publishing in the desktop UI and save durable JSON-lines publishing diagnostics.
+- Avoid copying macOS/Linux extended attributes and ACL metadata into temporary generated files.
+- Add large-manifest, permission, cancellation, recovery, diagnostics, and monotonic-progress regression tests.
+
 ## 0.8.5 - 2026-08-21
 
 - Check the latest public GitHub release in a background thread when the desktop app starts.

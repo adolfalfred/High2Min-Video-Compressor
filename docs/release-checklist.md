@@ -18,8 +18,8 @@
 ## Build a draft release
 
 ```sh
-git tag -a v0.8.5 -m "High2Min Video Compressor 0.8.5"
-git push origin v0.8.5
+git tag -a v0.9.0 -m "High2Min Video Compressor 0.9.0"
+git push origin v0.9.0
 ```
 
 - [ ] Open **Actions → Build release** and wait for all native build jobs and the draft-release job to succeed.
@@ -27,10 +27,12 @@ git push origin v0.8.5
 - [ ] Confirm it contains four archives, four `.sha256` sidecars, `SHA256SUMS.txt`, and a release index.
 - [ ] Download at least the Windows archive and verify its checksum and provenance.
 - [ ] Confirm the Windows application opens and performs a small compression test.
-- [ ] Confirm `High2Min Video Compressor.exe` opens without a terminal and `high2min.exe --version` prints `0.8.5` in PowerShell.
-- [ ] Confirm **Check for updates** reports that the published `0.8.5` release is current.
+- [ ] Confirm `High2Min Video Compressor.exe` opens without a terminal and `high2min.exe --version` prints `0.9.0` in PowerShell.
+- [ ] Confirm **Check for updates** reports that the published `0.9.0` release is current.
 - [ ] Confirm compression shows no FFmpeg/FFprobe console popups on Windows.
 - [ ] Confirm desktop Publish ADT updates the chosen repo itself and leaves existing ZIP files unchanged.
+- [ ] Confirm Publish ADT shows named progress phases through final validation and cleanup rather than stopping near 98%.
+- [ ] Confirm a cancelled pre-commit publication leaves the repository unchanged and a simulated interrupted transaction recovers on retry.
 - [ ] Confirm the published ADT shows the hand-sign control after a fresh browser reload.
 - [ ] Confirm voice-over can play while the sign-language video's playback time continues advancing.
 - [ ] Confirm an ADT with `assets/offline-preloader.js` receives refreshed embedded config, video mappings, HTML, and versioned script URLs.
@@ -54,4 +56,4 @@ git push origin v0.8.5
 - The archive contains audio, exceeds the intended video limit, or the UI does not open.
 - The release page does not clearly state that Windows and macOS builds are unsigned.
 
-If a problem is found, delete or retain the faulty draft for diagnosis, correct the source, increment the project version, and create a new patch tag such as `v0.8.6`. Do not reuse a release tag or silently replace a published asset.
+If a problem is found, delete or retain the faulty draft for diagnosis, correct the source, increment the project version, and create a new patch tag such as `v0.9.1`. Do not reuse a release tag or silently replace a published asset.

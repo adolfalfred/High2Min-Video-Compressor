@@ -7,6 +7,8 @@ import json
 import os
 import re
 import shutil
+import threading
+import time
 import uuid
 import zipfile
 from dataclasses import asdict, dataclass
@@ -16,9 +18,11 @@ import xml.etree.ElementTree as ET
 
 from .compression import validate_candidate
 from .contracts import CONTRACT_SCHEMA_VERSION, ExitCode
+from .diagnostics import DiagnosticLog
 from .errors import (
     InvalidInputError,
     PublishFailedError,
+    PublishingInterruptedError,
     ResourceLimitError,
     UnsafePathError,
     ValidationFailedError,
@@ -47,6 +51,7 @@ ESSENTIAL_SITE_RELATIVES: Final = (
 )
 OFFLINE_INLINE_MARKER: Final = "var INLINE = "
 OFFLINE_INLINE_END_MARKER: Final = ";\n  var BASE_DIR"
+TRANSACTION_SCHEMA_VERSION: Final = 1
 RUNTIME_SCRIPT_PATTERN: Final = re.compile(
     r'(?P<path>(?:\./)?assets/base\.bundle(?:\.[A-Za-z0-9_-]+)*\.js)'
     r'(?:\?[^"\'<>\s]*)?'
@@ -134,6 +139,7 @@ class PublishResult:
     bundle_version: str
     videos: tuple[PublishedVideo, ...]
     package: PackageResult | None
+    diagnostic_log: Path | None = None
 
     @property
     def total_bytes(self) -> int:
@@ -158,8 +164,73 @@ class PublishResult:
                 "bundle_version": self.bundle_version,
             },
             "package": self.package.to_dict() if self.package else None,
+            "diagnostic_log": str(self.diagnostic_log) if self.diagnostic_log else None,
             "items": [item.to_dict() for item in self.videos],
         }
+
+
+class _PublishReporter:
+    """Emit monotonic phase progress to the UI/CLI and a durable diagnostic log."""
+
+    def __init__(
+        self,
+        job_id: str,
+        callback: ProgressCallback | None,
+        diagnostic_log: str | os.PathLike[str] | None,
+        cancel_event: threading.Event | None,
+    ) -> None:
+        self.job_id = job_id
+        self.callback = callback
+        self.log = DiagnosticLog(diagnostic_log)
+        self.cancel_event = cancel_event
+        self.started = time.monotonic()
+        self.percent = 0.0
+
+    @property
+    def log_path(self) -> Path | None:
+        return self.log.path
+
+    def record(self, event: str, payload: dict[str, object]) -> None:
+        details = {"job_id": self.job_id, "elapsed_seconds": round(time.monotonic() - self.started, 3)}
+        details.update(payload)
+        self.log.write(event, details)
+
+    def phase(
+        self,
+        name: str,
+        percent: float,
+        message: str,
+        *,
+        current: str | None = None,
+        cancellable: bool = True,
+    ) -> None:
+        self.percent = max(self.percent, min(100.0, float(percent)))
+        payload: dict[str, object] = {
+            "kind": "publishing",
+            "phase": name,
+            "percent": self.percent,
+            "message": message,
+            "elapsed_seconds": round(time.monotonic() - self.started, 1),
+            "cancellable": cancellable,
+        }
+        if current:
+            payload["current"] = current
+        self.record("phase", payload)
+        if self.callback:
+            self.callback(self.job_id, "item_progress", payload)
+
+    def check_cancelled(self) -> None:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            self.record("cancelled", {"phase_percent": self.percent})
+            if self.callback:
+                self.callback(
+                    self.job_id,
+                    "job_interrupted",
+                    {"ok": False, "phase_percent": self.percent},
+                )
+            raise PublishingInterruptedError(
+                "ADT publishing was stopped safely before repository changes began."
+            )
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -340,12 +411,261 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _copy_and_hash_video(
+    source: Path,
+    destination: Path,
+    *,
+    reporter: _PublishReporter,
+    completed_bytes: int,
+    total_bytes: int,
+) -> str:
+    """Copy and hash once, reporting byte progress and honoring safe cancellation."""
+
+    digest = hashlib.sha256()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    try:
+        with source.open("rb") as input_stream, destination.open("xb") as output_stream:
+            while True:
+                reporter.check_cancelled()
+                block = input_stream.read(1024 * 1024)
+                if not block:
+                    break
+                output_stream.write(block)
+                digest.update(block)
+                copied += len(block)
+                overall = completed_bytes + copied
+                reporter.phase(
+                    "staging",
+                    25 + overall / max(1, total_bytes) * 35,
+                    "Copying and verifying compressed videos",
+                    current=source.name,
+                )
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+    except Exception:
+        if destination.exists():
+            destination.unlink()
+        raise
+    return digest.hexdigest()
+
+
 def _remove_generated_directory(path: Path, expected_parent: Path) -> None:
     resolved = path.resolve(strict=False)
     if resolved.parent != expected_parent.resolve() or ".adt-publish-" not in resolved.name:
         raise UnsafePathError(f"Refusing to remove an unexpected temporary directory: '{resolved}'.")
     if resolved.exists():
         shutil.rmtree(resolved)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+
+def _write_json_atomic(path: Path, document: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            json.dump(document, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _atomic_write_probe(directory: Path) -> None:
+    """Verify create, flush, rename, and delete permissions before expensive work."""
+
+    first = directory / f".high2min-write-test-{uuid.uuid4().hex}.tmp"
+    second = directory / f".high2min-write-test-{uuid.uuid4().hex}.tmp"
+    try:
+        with first.open("xb") as stream:
+            stream.write(b"high2min-write-test")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(first, second)
+        second.unlink()
+    except OSError as exc:
+        raise PublishFailedError(
+            f"High2Min cannot create, rename, and delete files in '{directory}': {exc}. "
+            "Move the ADT repository to a writable local folder or correct its permissions."
+        ) from exc
+    finally:
+        for path in (first, second):
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+
+
+def _preflight_in_place_filesystem(book: Path, language: str) -> None:
+    targets = (
+        book.parent,
+        book,
+        book / "assets",
+        book / "content" / "i18n" / language,
+    )
+    for directory in targets:
+        if not directory.is_dir():
+            raise PublishFailedError(f"Required writable ADT directory is missing: '{directory}'.")
+        _atomic_write_probe(directory)
+
+
+def _copy_file(source: Path, destination: Path) -> None:
+    """Copy file contents without propagating platform-specific xattrs or ACL metadata."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+
+
+def _copy_in_place_stage_sources(
+    source: Path,
+    stage: Path,
+    declared: tuple[str, ...],
+    reporter: _PublishReporter,
+) -> None:
+    """Stage only files that publishing can modify, never the complete ADT website."""
+
+    required = {
+        Path("assets") / "config.json",
+        OFFLINE_PRELOADER_RELATIVE,
+        Path("imsmanifest.xml"),
+    }
+    for relative_text in declared:
+        relative = Path(*PurePosixPath(relative_text).parts)
+        if relative.suffix.lower() == ".html":
+            required.add(relative)
+    for runtime in (source / "assets").glob(RUNTIME_BUNDLE_PATTERN):
+        if runtime.is_file():
+            required.add(runtime.relative_to(source))
+    ordered = sorted(required, key=lambda value: value.as_posix().casefold())
+    total = max(1, len(ordered))
+    for position, relative in enumerate(ordered, start=1):
+        reporter.check_cancelled()
+        source_file = source / relative
+        if source_file.is_file():
+            reporter.phase(
+                "staging",
+                22 + position / total * 3,
+                f"Preparing generated website files ({position}/{len(ordered)})",
+                current=relative.as_posix(),
+            )
+            _copy_file(source_file, stage / relative)
+
+
+def _write_manifest_file_list(source_manifest: Path, destination: Path, files: set[str]) -> tuple[str, ...]:
+    tree, _root, resource = _manifest_tree(source_manifest)
+    ordered = sorted(files, key=lambda value: (value != "index.html", value.casefold()))
+    seen: set[str] = set()
+    for child in list(resource):
+        if child.tag == f"{{{IMS_NAMESPACE}}}file":
+            resource.remove(child)
+    for relative in ordered:
+        normalized = _safe_archive_path(relative).as_posix()
+        key = normalized.casefold()
+        if key in seen:
+            raise PublishFailedError(f"Publication would create a duplicate manifest path: '{normalized}'.")
+        seen.add(key)
+        ET.SubElement(resource, f"{{{IMS_NAMESPACE}}}file", {"href": normalized})
+    ET.register_namespace("", IMS_NAMESPACE)
+    ET.register_namespace("adlcp", ADLCP_NAMESPACE)
+    ET.register_namespace("xsi", XSI_NAMESPACE)
+    ET.indent(tree, space="  ")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tree.write(destination, encoding="utf-8", xml_declaration=True)
+    return tuple(ordered)
+
+
+def _update_in_place_manifest(
+    source: Path,
+    stage: Path,
+    *,
+    language: str,
+    declared: tuple[str, ...],
+    videos: tuple[PageVideo, ...],
+) -> tuple[str, ...]:
+    prefix = f"content/i18n/{language}/video/".casefold()
+    files = {relative for relative in declared if not relative.casefold().startswith(prefix)}
+    files.update(f"content/i18n/{language}/video/{item.filename}" for item in videos)
+    files.add(f"content/i18n/{language}/videos.json")
+    for relative in ESSENTIAL_SITE_RELATIVES:
+        if (source / relative).is_file() or (stage / relative).is_file():
+            files.add(relative.as_posix())
+    for runtime in (stage / "assets").glob(RUNTIME_BUNDLE_PATTERN):
+        if runtime.is_file():
+            files.add(runtime.relative_to(stage).as_posix())
+    return _write_manifest_file_list(
+        source / "imsmanifest.xml",
+        stage / "imsmanifest.xml",
+        files,
+    )
+
+
+def _overlay_file(source: Path, stage: Path, relative: str) -> Path:
+    path = Path(*PurePosixPath(relative).parts)
+    staged = stage / path
+    return staged if staged.is_file() else source / path
+
+
+def _validate_staged_in_place(
+    source: Path,
+    stage: Path,
+    *,
+    language: str,
+) -> dict[str, object]:
+    """Validate a minimal staged overlay without materializing another website copy."""
+
+    page_count = _page_count(source)
+    config = _read_json(stage / "assets" / "config.json", "staged assets/config.json")
+    if not isinstance(config, dict):
+        raise PublishFailedError("Staged assets/config.json must contain an object.")
+    features = config.get("features")
+    if (
+        not isinstance(features, dict)
+        or features.get("signLanguage") is not True
+        or features.get("readAloud") is not True
+    ):
+        raise PublishFailedError("The staged config does not enable sign language and voice-over.")
+    videos_path = stage / "content" / "i18n" / language / "videos.json"
+    mappings = _read_json(videos_path, f"staged {language}/videos.json")
+    if not isinstance(mappings, dict):
+        raise PublishFailedError("Staged videos.json must contain an object.")
+    video_root = videos_path.parent / "video"
+    expected_files: set[str] = set()
+    for key, filename in mappings.items():
+        match = re.fullmatch(r"video-([1-9][0-9]*)", str(key))
+        if not match or int(match.group(1)) > page_count:
+            raise PublishFailedError(f"Staged videos.json contains an invalid key: '{key}'.")
+        expected = f"page_{int(match.group(1))}.mp4"
+        if filename != expected or not (video_root / expected).is_file():
+            raise PublishFailedError(f"Staged mapping '{key}' must point to an existing '{expected}'.")
+        expected_files.add(expected.casefold())
+    actual_files = {
+        path.name.casefold() for path in video_root.glob("*.mp4") if path.is_file()
+    }
+    if actual_files != expected_files:
+        raise PublishFailedError("The staged video directory and videos.json do not match exactly.")
+    declared = declared_manifest_files(stage / "imsmanifest.xml")
+    missing = [relative for relative in declared if not _overlay_file(source, stage, relative).is_file()]
+    if missing:
+        raise PublishFailedError(
+            f"Staged manifest references {len(missing)} missing file(s); first: '{missing[0]}'."
+        )
+    return {
+        "page_count": page_count,
+        "video_count": len(mappings),
+        "language": language,
+        "manifest_file_count": len(declared),
+        "bundle_version": str(config.get("bundleVersion")),
+    }
 
 
 def _validate_media(item: PageVideo, maximum_bytes: int, probe_path: str | None) -> None:
@@ -712,10 +1032,13 @@ def _commit_in_place(
     book: Path,
     language: str,
     runtime_relatives: tuple[Path, ...],
+    reporter: _PublishReporter,
 ) -> None:
-    """Replace only generated ADT assets, restoring the originals on any failure."""
+    """Atomically swap generated assets and restore them from a durable journal on failure."""
 
-    backup = book.parent / f".{book.name}.adt-publish-{uuid.uuid4().hex}.backup"
+    transaction_id = uuid.uuid4().hex
+    backup = book.parent / f".{book.name}.adt-publish-{transaction_id}.backup"
+    journal = backup / "transaction.json"
     video_relative = Path("content") / "i18n" / language / "video"
     file_relatives = (
         Path("assets") / "config.json",
@@ -723,60 +1046,142 @@ def _commit_in_place(
         *runtime_relatives,
         Path("imsmanifest.xml"),
     )
-    target_video = book / video_relative
-    staged_video = stage / video_relative
-    backup_video = backup / video_relative
-    changed = False
+    relatives = tuple(dict.fromkeys((video_relative, *file_relatives)))
+    targets = [
+        {
+            "relative": relative.as_posix(),
+            "had_original": (book / relative).exists(),
+        }
+        for relative in relatives
+    ]
+    document: dict[str, object] = {
+        "schema_version": TRANSACTION_SCHEMA_VERSION,
+        "transaction_id": transaction_id,
+        "status": "committing",
+        "book": str(book),
+        "stage": str(stage),
+        "language": language,
+        "targets": targets,
+    }
     try:
         backup.mkdir()
-        if target_video.exists():
-            shutil.copytree(target_video, backup_video)
-        for relative in file_relatives:
-            target = book / relative
-            if target.is_file():
-                saved = backup / relative
-                saved.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(target, saved)
-
-        changed = True
-        if target_video.exists():
-            shutil.rmtree(target_video)
-        target_video.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(staged_video), str(target_video))
-        for relative in file_relatives:
+        _write_json_atomic(journal, document)
+        total = max(1, len(relatives))
+        for position, relative in enumerate(relatives, start=1):
             staged = stage / relative
+            if not staged.exists():
+                raise PublishFailedError(f"Staged publication target is missing: '{relative.as_posix()}'.")
             target = book / relative
+            saved = backup / relative
             target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() or target.is_symlink():
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(target, saved)
             os.replace(staged, target)
-
+            reporter.phase(
+                "commit",
+                85 + position / total * 10,
+                f"Committing repository changes ({position}/{total})",
+                current=relative.as_posix(),
+                cancellable=False,
+            )
+        reporter.phase(
+            "final_validation",
+            97,
+            "Validating the updated ADT repository",
+            cancellable=False,
+        )
         validate_adt_website(book, language=language, allow_unmanifested=True)
-    except Exception:
-        if changed:
-            try:
-                if target_video.exists():
-                    shutil.rmtree(target_video)
-                if backup_video.exists():
-                    target_video.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(backup_video), str(target_video))
-                for relative in file_relatives:
-                    target = book / relative
-                    saved = backup / relative
-                    if saved.is_file():
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        os.replace(saved, target)
-                    elif target.exists():
-                        target.unlink()
-            except Exception as recovery_error:
-                raise PublishFailedError(
-                    f"Publishing failed and automatic recovery was incomplete. "
-                    f"Original files remain in '{backup}'."
-                ) from recovery_error
-        if backup.exists():
-            _remove_generated_directory(backup, book.parent)
-        raise
-    else:
-        if backup.exists():
-            _remove_generated_directory(backup, book.parent)
+        document["status"] = "committed"
+        _write_json_atomic(journal, document)
+    except Exception as original_error:
+        reporter.record("rollback_started", {"error": str(original_error), "backup": str(backup)})
+        try:
+            _rollback_transaction(book, stage, backup, targets)
+        except Exception as recovery_error:
+            reporter.record("rollback_failed", {"error": str(recovery_error), "backup": str(backup)})
+            raise PublishFailedError(
+                "Publishing failed and automatic recovery was incomplete. "
+                f"Original files remain in '{backup}'."
+            ) from recovery_error
+        reporter.record("rollback_completed", {"backup": str(backup)})
+        raise original_error
+
+    reporter.phase("cleanup", 99, "Removing transaction files", cancellable=False)
+    cleanup_errors: list[str] = []
+    for generated in (stage, backup):
+        if not generated.exists():
+            continue
+        try:
+            _remove_generated_directory(generated, book.parent)
+        except OSError as exc:
+            cleanup_errors.append(f"{generated}: {exc}")
+    if cleanup_errors:
+        reporter.record("cleanup_deferred", {"errors": cleanup_errors})
+
+
+def _transaction_targets(document: object) -> list[dict[str, object]]:
+    if not isinstance(document, dict) or document.get("schema_version") != TRANSACTION_SCHEMA_VERSION:
+        raise PublishFailedError("ADT recovery journal has an unsupported format.")
+    values = document.get("targets")
+    if not isinstance(values, list) or not values:
+        raise PublishFailedError("ADT recovery journal contains no transaction targets.")
+    targets: list[dict[str, object]] = []
+    for value in values:
+        if not isinstance(value, dict) or not isinstance(value.get("relative"), str):
+            raise PublishFailedError("ADT recovery journal contains an invalid target.")
+        relative = _safe_archive_path(str(value["relative"])).as_posix()
+        targets.append({"relative": relative, "had_original": value.get("had_original") is True})
+    return targets
+
+
+def _rollback_transaction(
+    book: Path,
+    stage: Path,
+    backup: Path,
+    targets: list[dict[str, object]],
+) -> None:
+    for value in reversed(targets):
+        relative = Path(*PurePosixPath(str(value["relative"])).parts)
+        target = book / relative
+        saved = backup / relative
+        if saved.exists() or saved.is_symlink():
+            _remove_path(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(saved, target)
+        elif value.get("had_original") is not True:
+            _remove_path(target)
+    if stage.exists():
+        _remove_generated_directory(stage, book.parent)
+    if backup.exists():
+        _remove_generated_directory(backup, book.parent)
+
+
+def _recover_pending_transactions(book: Path, reporter: _PublishReporter) -> None:
+    pattern = f".{book.name}.adt-publish-*.backup"
+    for backup in sorted(book.parent.glob(pattern), key=lambda path: path.name):
+        journal = backup / "transaction.json"
+        if not journal.is_file():
+            reporter.record("legacy_backup_preserved", {"backup": str(backup)})
+            continue
+        document = _read_json(journal, "ADT recovery journal")
+        if not isinstance(document, dict) or Path(str(document.get("book", ""))).resolve() != book:
+            raise PublishFailedError(f"ADT recovery journal does not belong to '{book}': '{journal}'.")
+        targets = _transaction_targets(document)
+        stage = Path(str(document.get("stage", ""))).resolve(strict=False)
+        if stage.parent != book.parent or ".adt-publish-" not in stage.name:
+            raise UnsafePathError(f"ADT recovery journal contains an unsafe stage path: '{stage}'.")
+        status = document.get("status")
+        reporter.record("recovery_started", {"backup": str(backup)})
+        if status == "committed":
+            for generated in (stage, backup):
+                if generated.exists():
+                    _remove_generated_directory(generated, book.parent)
+        elif status == "committing":
+            _rollback_transaction(book, stage, backup, targets)
+        else:
+            raise PublishFailedError(f"ADT recovery journal has an invalid status: {status!r}.")
+        reporter.record("recovery_completed", {"backup": str(backup), "status": status})
 
 
 def publish_adt(
@@ -792,10 +1197,27 @@ def publish_adt(
     probe_path: str | None = None,
     validate_media: bool = True,
     progress_callback: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
+    diagnostic_log: str | os.PathLike[str] | None = None,
 ) -> PublishResult:
     """Publish videos into a new copy, or transactionally update an ADT website in place."""
 
     job_id = uuid.uuid4().hex
+    reporter = _PublishReporter(
+        job_id,
+        progress_callback,
+        diagnostic_log,
+        cancel_event,
+    )
+    reporter.record(
+        "job_created",
+        {
+            "book": str(book),
+            "videos": str(videos),
+            "in_place": in_place,
+            "os_name": os.name,
+        },
+    )
     source_book = _resolve_directory(book, "Source ADT website")
     video_root = _resolve_directory(videos, "Compressed video")
     if in_place:
@@ -829,9 +1251,11 @@ def publish_adt(
     if package_path:
         package_path.parent.mkdir(parents=True, exist_ok=True)
 
+    _recover_pending_transactions(source_book, reporter)
     page_count = _page_count(source_book)
     config, selected_language = _book_configuration(source_book, language)
     if in_place:
+        _preflight_in_place_filesystem(source_book, selected_language)
         target_video_root = source_book / "content" / "i18n" / selected_language / "video"
         if (
             _same_path(video_root, target_video_root)
@@ -844,28 +1268,65 @@ def publish_adt(
     items = discover_page_videos(video_root, page_count=page_count, recursive=recursive)
     total_video_bytes = sum(item.size_bytes for item in items)
     source_declared = declared_manifest_files(source_book / "imsmanifest.xml")
-    source_bytes = sum(
-        (source_book / Path(*PurePosixPath(relative).parts)).stat().st_size
-        for relative in source_declared
-        if (source_book / Path(*PurePosixPath(relative).parts)).is_file()
-    )
-    required_bytes = source_bytes + total_video_bytes + 32 * 1024 * 1024
-    if package_path:
-        required_bytes += source_bytes + total_video_bytes
+    if in_place:
+        stage_source_paths: set[Path] = {
+            source_book / "assets" / "config.json",
+            source_book / "assets" / "offline-preloader.js",
+            source_book / "imsmanifest.xml",
+        }
+        stage_source_paths.update(
+            source_book / Path(*PurePosixPath(relative).parts)
+            for relative in source_declared
+            if PurePosixPath(relative).suffix.lower() == ".html"
+        )
+        stage_source_paths.update(
+            path for path in (source_book / "assets").glob(RUNTIME_BUNDLE_PATTERN) if path.is_file()
+        )
+        staged_source_bytes = sum(path.stat().st_size for path in stage_source_paths if path.is_file())
+        estimated_stage_bytes = total_video_bytes + staged_source_bytes
+        required_bytes = estimated_stage_bytes + max(64 * 1024 * 1024, estimated_stage_bytes // 10)
+    else:
+        source_bytes = sum(
+            (source_book / Path(*PurePosixPath(relative).parts)).stat().st_size
+            for relative in source_declared
+            if (source_book / Path(*PurePosixPath(relative).parts)).is_file()
+        )
+        required_bytes = source_bytes + total_video_bytes + 32 * 1024 * 1024
+        if package_path:
+            required_bytes += source_bytes + total_video_bytes
     available = shutil.disk_usage(output_book.parent).free
     if available < required_bytes:
         raise ResourceLimitError(
             f"Publishing needs about {format_megabytes(required_bytes)}, but only "
             f"{format_megabytes(available)} is free."
         )
+    reporter.record(
+        "preflight_completed",
+        {
+            "page_count": page_count,
+            "video_count": len(items),
+            "required_bytes": required_bytes,
+            "available_bytes": available,
+            "declared_files": len(source_declared),
+        },
+    )
 
     if progress_callback:
         progress_callback(job_id, "job_started", {"command": "publish", "total": len(items)})
-    for item in items:
+    reporter.phase("preflight", 3, "ADT paths, permissions, and storage checks passed")
+    reporter.phase("media_validation", 5, "Validating compressed videos")
+    for position, item in enumerate(items, start=1):
+        reporter.check_cancelled()
         if progress_callback:
             progress_callback(job_id, "item_started", {"source": str(item.source)})
         if validate_media:
             _validate_media(item, maximum_bytes, probe_path)
+        reporter.phase(
+            "media_validation",
+            5 + position / len(items) * 15,
+            f"Validated video {position} of {len(items)}",
+            current=item.source.name,
+        )
 
     stage = output_book.parent / f".{output_book.name}.adt-publish-{uuid.uuid4().hex}.tmp"
     package_temporary = package_path.with_name(f".{package_path.name}.{uuid.uuid4().hex}.tmp") if package_path else None
@@ -876,14 +1337,27 @@ def publish_adt(
     try:
         stage.mkdir()
         video_relative_root = f"content/i18n/{selected_language}/video"
-        _copy_manifest_site(source_book, stage, skip_prefix=video_relative_root)
+        reporter.check_cancelled()
+        reporter.phase("staging", 22, "Preparing publication files")
+        if in_place:
+            _copy_in_place_stage_sources(source_book, stage, source_declared, reporter)
+        else:
+            _copy_manifest_site(source_book, stage, skip_prefix=video_relative_root)
         stage_video_root = stage / "content" / "i18n" / selected_language / "video"
         stage_video_root.mkdir(parents=True, exist_ok=True)
         mappings: dict[str, str] = {}
-        for item in items:
+        copied_video_bytes = 0
+        for position, item in enumerate(items, start=1):
+            reporter.check_cancelled()
             destination = stage_video_root / item.filename
-            shutil.copy2(item.source, destination)
-            digest = _hash_file(destination)
+            digest = _copy_and_hash_video(
+                item.source,
+                destination,
+                reporter=reporter,
+                completed_bytes=copied_video_bytes,
+                total_bytes=total_video_bytes,
+            )
+            copied_video_bytes += item.size_bytes
             published.append(
                 PublishedVideo(
                     source=item.source,
@@ -901,7 +1375,15 @@ def publish_adt(
                     "item_completed",
                     {"source": str(item.source), "status": "published", "size_bytes": item.size_bytes},
                 )
+            reporter.phase(
+                "staging",
+                25 + position / len(items) * 35,
+                f"Staged video {position} of {len(items)}",
+                current=item.filename,
+            )
 
+        reporter.check_cancelled()
+        reporter.phase("metadata", 64, "Updating ADT video mappings and configuration")
         _write_json(stage / "content" / "i18n" / selected_language / "videos.json", mappings)
         staged_config_path = stage / "assets" / "config.json"
         staged_config = _read_json(staged_config_path, "assets/config.json")
@@ -915,14 +1397,33 @@ def publish_adt(
         incremented, bundle_version = _increment_bundle_version(config.get("bundleVersion"))
         staged_config["bundleVersion"] = incremented
         _write_json(staged_config_path, staged_config)
+        reporter.phase("runtime", 69, "Updating accessibility controls")
         runtime_relatives = _enable_parallel_accessibility_media(stage)
+        reporter.check_cancelled()
+        reporter.phase("offline", 74, "Refreshing offline pages and cache data")
         offline_relatives = _synchronize_offline_preloader(
             stage,
             language=selected_language,
             bundle_version=bundle_version,
         )
-        _update_manifest(stage)
-        validation = validate_adt_website(stage, language=selected_language)
+        reporter.check_cancelled()
+        reporter.phase("staged_validation", 80, "Validating staged publication files")
+        if in_place:
+            _update_in_place_manifest(
+                source_book,
+                stage,
+                language=selected_language,
+                declared=source_declared,
+                videos=items,
+            )
+            validation = _validate_staged_in_place(
+                source_book,
+                stage,
+                language=selected_language,
+            )
+        else:
+            _update_manifest(stage)
+            validation = validate_adt_website(stage, language=selected_language)
         if validation["video_count"] != len(items):
             raise PublishFailedError("Published website video count changed during validation.")
 
@@ -939,14 +1440,22 @@ def publish_adt(
             )
 
         if in_place:
+            reporter.check_cancelled()
+            reporter.phase(
+                "commit",
+                85,
+                "Beginning the short repository transaction",
+                cancellable=False,
+            )
             _commit_in_place(
                 stage,
                 source_book,
                 selected_language,
                 tuple(dict.fromkeys((*runtime_relatives, *offline_relatives))),
+                reporter,
             )
-            _remove_generated_directory(stage, output_book.parent)
         else:
+            reporter.phase("commit", 90, "Publishing the new ADT website copy", cancellable=False)
             stage.replace(output_book)
             committed_output = True
         if package_path and package_temporary and checksum_path and checksum_temporary:
@@ -961,7 +1470,10 @@ def publish_adt(
             bundle_version=bundle_version,
             videos=tuple(published),
             package=package_result,
+            diagnostic_log=reporter.log_path,
         )
+        reporter.phase("completed", 100, "ADT publishing completed", cancellable=False)
+        reporter.record("job_completed", {"output": str(output_book), "videos": len(published)})
         if progress_callback:
             progress_callback(
                 job_id,
@@ -969,7 +1481,8 @@ def publish_adt(
                 {"ok": True, "exit_code": int(ExitCode.SUCCESS), "output": str(output_book)},
             )
         return result
-    except Exception:
+    except Exception as exc:
+        reporter.record("job_failed", {"error_type": type(exc).__name__, "error": str(exc)})
         if stage.exists():
             _remove_generated_directory(stage, output_book.parent)
         if package_temporary and package_temporary.exists():
