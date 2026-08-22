@@ -10,7 +10,9 @@ These certificate-free binaries are built on native GitHub-hosted runners and pu
 
 Maintainers can follow the [certificate-free release checklist](docs/release-checklist.md) to build and publish a new version.
 
-Version 0.9.0 uses the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages. FFmpeg and FFprobe remain hidden during Windows desktop jobs, so compression does not flash console windows.
+The active 0.10.0 development plan is documented in [Flexible video ordering and in-app updates](docs/v0.10.0-implementation-plan.md).
+
+Version 0.10.0 is the active development line and retains the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages. FFmpeg and FFprobe remain hidden during Windows desktop jobs, so compression does not flash console windows.
 
 The desktop app checks the latest public GitHub release in the background at startup, at most once every 24 hours after a successful check. When a newer stable version exists, it asks before opening the verified GitHub release page; it never silently replaces its own files. Offline automatic checks stay silent, and **Check for updates** provides an immediate manual check.
 

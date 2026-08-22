@@ -128,6 +128,40 @@ def read_offline_inline(preloader: Path) -> dict[str, object]:
 
 
 class PublishingTests(unittest.TestCase):
+    def test_staged_video_copy_does_not_force_per_file_disk_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.mp4"
+            destination = root / "stage" / "page_1.mp4"
+            source.write_bytes(b"video-data" * 200_000)
+            reporter = publishing._PublishReporter("job", None, None, None)
+
+            with patch("adt_video_publisher.publishing.os.fsync") as forced_sync:
+                digest = publishing._copy_and_hash_video(
+                    source,
+                    destination,
+                    reporter=reporter,
+                    completed_bytes=0,
+                    total_bytes=source.stat().st_size,
+                )
+
+            forced_sync.assert_not_called()
+            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            self.assertEqual(digest, hashlib.sha256(source.read_bytes()).hexdigest())
+
+    def test_transaction_journal_keeps_durable_disk_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = Path(temporary) / "transaction.json"
+
+            with patch("adt_video_publisher.publishing.os.fsync") as durable_sync:
+                publishing._write_json_atomic(journal, {"status": "committing"})
+
+            durable_sync.assert_called_once()
+            self.assertEqual(
+                json.loads(journal.read_text(encoding="utf-8")),
+                {"status": "committing"},
+            )
+
     def test_in_place_publish_stages_only_files_that_can_change(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

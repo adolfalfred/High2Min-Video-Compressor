@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0 - Unreleased
+
+- Reserve the next development version for flexible number-based video ordering and verified in-app platform downloads.
+- Document the safety, platform-selection, progress, cancellation, integrity-verification, and regression-test requirements before implementation.
+- Avoid forced physical disk synchronization after every staged video, preventing long Linux stalls on FUSE, NTFS, exFAT, SMB, and NFS filesystems while retaining durable transaction-journal synchronization.
+
 ## 0.9.0 - 2026-08-22
 
 - Replace full-site in-place ADT staging with a minimal overlay containing only videos and generated files.

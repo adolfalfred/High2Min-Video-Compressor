@@ -442,7 +442,10 @@ def _copy_and_hash_video(
                     current=source.name,
                 )
             output_stream.flush()
-            os.fsync(output_stream.fileno())
+            # Closing the temporary staged file is sufficient here. A forced sync after
+            # every video can block for minutes on Linux FUSE, NTFS, exFAT, SMB, and NFS
+            # mounts. The repository is still untouched at this phase, and the durable
+            # transaction journal below retains fsync before any atomic replacements.
     except Exception:
         if destination.exists():
             destination.unlink()
