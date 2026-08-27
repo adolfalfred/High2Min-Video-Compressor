@@ -9,10 +9,12 @@ import threading
 import time
 import uuid
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import __version__
+from .adt_planning import AdtPublishPlan
 from .batch import BatchRunResult
 from .desktop_controller import (
     AnalysisSummary,
@@ -108,6 +110,8 @@ def create_application(
             self.ffmpeg_var = tk.StringVar()
             self.book_var = tk.StringVar()
             self.language_var = tk.StringVar()
+            self.mapping_var = tk.StringVar()
+            self.publish_mode_var = tk.StringVar(value="Merge existing videos (Recommended)")
             self.status_var = tk.StringVar(value="Choose a video file or folder to begin.")
             self.analysis_var = tk.StringVar(value="System has not been analyzed yet.")
             self.progress_var = tk.DoubleVar(value=0)
@@ -300,6 +304,25 @@ def create_application(
             ttk.Entry(publishing, textvariable=self.language_var, width=10).grid(
                 row=0, column=4, sticky="ew", padx=(6, 0)
             )
+            ttk.Label(publishing, text="Page mapping (optional):").grid(
+                row=1, column=0, sticky="w", pady=(10, 0)
+            )
+            ttk.Entry(publishing, textvariable=self.mapping_var).grid(
+                row=1, column=1, sticky="ew", padx=8, pady=(10, 0)
+            )
+            ttk.Button(publishing, text="Choose mapping…", command=self.choose_mapping).grid(
+                row=1, column=2, padx=(0, 6), pady=(10, 0)
+            )
+            ttk.Label(publishing, text="Existing videos:").grid(
+                row=1, column=3, sticky="w", pady=(10, 0)
+            )
+            ttk.Combobox(
+                publishing,
+                textvariable=self.publish_mode_var,
+                values=("Merge existing videos (Recommended)", "Replace existing videos"),
+                state="readonly",
+                width=27,
+            ).grid(row=1, column=4, sticky="ew", padx=(6, 0), pady=(10, 0))
             ttk.Label(
                 publishing,
                 text=(
@@ -308,7 +331,7 @@ def create_application(
                 ),
                 wraplength=850,
                 justify="left",
-            ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(10, 0))
+            ).grid(row=2, column=0, columnspan=5, sticky="w", pady=(10, 0))
 
             system = ttk.LabelFrame(main, text="System analysis", padding=12)
             system.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(0, 10))
@@ -331,14 +354,16 @@ def create_application(
             self.resume_button = ttk.Button(actions, text="Resume saved job…", command=self.resume_job)
             self.resume_button.grid(row=0, column=2, padx=(0, 8))
             self.publish_button = ttk.Button(actions, text="Update ADT website", command=self.publish)
-            self.publish_button.grid(row=0, column=3, padx=(0, 8))
+            self.publish_plan_button = ttk.Button(actions, text="Analyze ADT changes", command=self.analyze_publish)
+            self.publish_plan_button.grid(row=0, column=3, padx=(0, 8))
+            self.publish_button.grid(row=0, column=4, padx=(0, 8))
             self.cancel_button = ttk.Button(
                 actions,
                 text="Stop after current videos",
                 command=self.cancel,
                 state="disabled",
             )
-            self.cancel_button.grid(row=0, column=4)
+            self.cancel_button.grid(row=0, column=5)
 
             progress_frame = ttk.Frame(main)
             progress_frame.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(0, 10))
@@ -387,7 +412,7 @@ def create_application(
                 self.drop_zone.dnd_bind("<<DropLeave>>", self._on_drop_leave)
                 self.drop_zone.dnd_bind("<<Drop>>", self._on_drop)
                 self.drop_zone.bind("<Button-1>", lambda _event: self.choose_source_folder())
-            except Exception:
+            except Exception:  # noqa: BLE001 - optional Tk drag-and-drop integration can fail platform-specifically.
                 self.drop_zone.configure(
                     text="Drag-and-drop is unavailable; use Choose folder or Choose file",
                     background="#f3f4f6",
@@ -413,7 +438,7 @@ def create_application(
             self._on_drop_leave(event)
             try:
                 raw_paths = self.root.tk.splitlist(getattr(event, "data", ""))
-            except Exception:
+            except Exception:  # noqa: BLE001 - Tcl returns platform-specific malformed drop payload errors.
                 raw_paths = ()
             paths = [Path(raw).expanduser() for raw in raw_paths if str(raw).strip()]
             if len(paths) != 1:
@@ -481,6 +506,14 @@ def create_application(
                 return
             self.book_var.set(selected)
 
+        def choose_mapping(self) -> None:
+            selected = filedialog.askopenfilename(
+                title="Choose optional page mapping",
+                filetypes=[("Page mappings", "*.json *.csv"), ("All files", "*.*")],
+            )
+            if selected:
+                self.mapping_var.set(selected)
+
         def _apply_profile(self, _event: object | None = None) -> None:
             if self.profile_var.get().startswith("ADT website"):
                 self.maximum_size_var.set("5")
@@ -543,27 +576,50 @@ def create_application(
                 ),
             )
 
-        def publish(self) -> None:
+        def _publish_settings(self, *, confirm_removals: bool = False) -> DesktopPublishSettings:
             compressed = self.output_var.get().strip()
             book = self.book_var.get().strip()
             if not compressed or not book:
-                messagebox.showerror(
-                    "Cannot publish",
-                    "Choose the compressed-copy folder and the ADT website to update.",
-                    parent=self.root,
-                )
-                return
+                raise InvalidInputError("Choose the compressed-copy folder and the ADT website to update.")
+            return DesktopPublishSettings(
+                videos=compressed,
+                book=book,
+                in_place=True,
+                language=self.language_var.get().strip() or None,
+                recursive=self.recursive_var.get(),
+                mapping_file=self.mapping_var.get().strip() or None,
+                mode="replace" if self.publish_mode_var.get().startswith("Replace") else "merge",
+                confirm_removals=confirm_removals,
+                maximum_bytes=mebibytes_to_bytes(self.maximum_size_var.get()),
+                probe_path=self.ffmpeg_var.get().strip() or None,
+                diagnostic_log=str(new_publish_log_path(uuid.uuid4().hex)),
+            )
+
+        def analyze_publish(self) -> None:
             try:
-                settings = DesktopPublishSettings(
-                    videos=compressed,
-                    book=book,
-                    in_place=True,
-                    language=self.language_var.get().strip() or None,
-                    recursive=self.recursive_var.get(),
-                    maximum_bytes=mebibytes_to_bytes(self.maximum_size_var.get()),
-                    probe_path=self.ffmpeg_var.get().strip() or None,
-                    diagnostic_log=str(new_publish_log_path(uuid.uuid4().hex)),
-                )
+                settings = self._publish_settings()
+            except AdtVideoError as exc:
+                messagebox.showerror("Cannot analyze ADT", str(exc), parent=self.root)
+                return
+            self._start_task("publish_analysis", lambda: self.controller.analyze_publish(settings))
+
+        def publish(self) -> None:
+            try:
+                preview = self.controller.analyze_publish(self._publish_settings())
+                confirm = False
+                if preview.blockers:
+                    raise InvalidInputError(" ".join(preview.blockers))
+                if preview.removals:
+                    confirm = messagebox.askyesno(
+                        "Confirm video removals",
+                        f"Replace mode will remove {len(preview.removals)} existing video file(s). "
+                        "Continue with these reviewed removals?",
+                        parent=self.root,
+                    )
+                    if not confirm:
+                        self.status_var.set("Publishing cancelled; no website files were changed.")
+                        return
+                settings = self._publish_settings(confirm_removals=confirm)
             except AdtVideoError as exc:
                 messagebox.showerror("Cannot publish", str(exc), parent=self.root)
                 return
@@ -625,7 +681,7 @@ def create_application(
             def runner() -> None:
                 try:
                     value = work()
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - worker must relay every failure to the UI thread.
                     self.messages.put(("error", exc))
                 else:
                     self.messages.put(("done", value))
@@ -669,7 +725,7 @@ def create_application(
             def runner() -> None:
                 try:
                     result = self.update_checker(force=manual)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - background update checks must not terminate the UI.
                     self.messages.put(("update_error", (exc, manual)))
                 else:
                     self.messages.put(("update_result", (result, manual)))
@@ -709,7 +765,7 @@ def create_application(
             if should_open:
                 try:
                     opened = webbrowser.open_new_tab(result.release_url)
-                except Exception:
+                except Exception:  # noqa: BLE001 - browser launch errors are handled with a manual-link fallback.
                     opened = False
                 if not opened:
                     messagebox.showinfo(
@@ -829,6 +885,20 @@ def create_application(
                 )
                 self.status_var.set("System analysis completed. No videos were changed.")
                 self._append_log("System analysis completed.")
+            elif isinstance(value, AdtPublishPlan):
+                self.status_var.set(
+                    f"ADT preview: {len(value.videos)} video(s), {len(value.mutations)} file change(s), "
+                    f"{len(value.removals)} removal(s), {len(value.blockers)} blocker(s). No files changed."
+                )
+                self._append_log(self.status_var.get())
+                for item in value.videos:
+                    self._append_log(
+                        f"{item.source_filename} → ADT page {item.page_index} ({item.page_href}) → {item.destination_filename}"
+                    )
+                for warning in value.warnings:
+                    self._append_log(f"Warning: {warning}")
+                for blocker in value.blockers:
+                    self._append_log(f"Blocker: {blocker}")
             elif isinstance(value, BatchRunResult):
                 summary = value.summary
                 self.progress_var.set(100 if summary.total else 0)
@@ -897,6 +967,7 @@ def create_application(
                 self.analyze_button,
                 self.start_button,
                 self.resume_button,
+                self.publish_plan_button,
                 self.publish_button,
             ):
                 button.configure(state=normal)
@@ -948,7 +1019,7 @@ def run() -> int:
         from tkinterdnd2 import TkinterDnD
 
         root = TkinterDnD.Tk()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - top-level desktop boundary reports unavailable UI environments.
         # TclError is platform-specific; keep the CLI usable when no display is available.
         sys.stderr.write(f"high2min-ui: desktop interface is unavailable: {exc}\n")
         return 69
@@ -973,7 +1044,7 @@ def smoke_test() -> int:
         if "Drop one video" not in application.drop_zone.cget("text"):
             raise RuntimeError("Drag-and-drop controls were not created.")
         root.destroy()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - smoke test must report any UI initialization failure.
         sys.stderr.write(f"high2min-ui: desktop smoke test failed: {exc}\n")
         return 69
     return 0

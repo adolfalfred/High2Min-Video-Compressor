@@ -59,6 +59,7 @@ SCHEMA_FILES: Final[dict[str, str]] = {
     "job-plan": "job-plan-v1.schema.json",
     "progress-event": "progress-event-v1.schema.json",
     "publish-result": "publish-result-v1.schema.json",
+    "publish-plan": "publish-plan-v1.schema.json",
     "result": "result-v1.schema.json",
 }
 
@@ -70,6 +71,8 @@ COMMANDS: Final[tuple[dict[str, str], ...]] = (
     {"name": "compress", "status": "available", "purpose": "Create validated compressed copies."},
     {"name": "verify", "status": "available", "purpose": "Validate compressed video outputs."},
     {"name": "publish", "status": "available", "purpose": "Publish videos into an ADT website in place or as a copy."},
+    {"name": "publish-plan", "status": "available", "purpose": "Preview ADT compatibility, mappings, and file changes without writing."},
+    {"name": "browser-test", "status": "available", "purpose": "Validate responsive sign-video and narration behavior in Chromium."},
     {"name": "resume", "status": "available", "purpose": "Resume an interrupted job."},
     {"name": "ui", "status": "available", "purpose": "Open the optional desktop interface."},
 )
@@ -98,7 +101,10 @@ def contract_document() -> dict[str, object]:
             "non_interactive_cli": True,
             "ui_optional": True,
             "originals_immutable": True,
-            "separate_output_required": True,
+            "separate_compression_output_required": True,
+            "publish_preview_read_only": True,
+            "in_place_publish_transactional": True,
+            "adt_zip_files_immutable": True,
             "structured_output": True,
             "quality_first_encoding": True,
             "objective_quality_validation": "ssim",

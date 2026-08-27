@@ -8,11 +8,13 @@ import sys
 import threading
 import uuid
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TextIO
 
 from . import __version__
+from .adt_planning import AdtPublishPlan, analyze_adt_publish
 from .batch import BatchRunResult, load_resume_request, run_batch
+from .browser_validation import BrowserValidationResult, run_browser_contract_tests
 from .compression import (
     DEFAULT_CRF,
     DEFAULT_MAXIMUM_ATTEMPTS,
@@ -76,7 +78,7 @@ class ProgressEmitter:
                 "schema_version": CONTRACT_SCHEMA_VERSION,
                 "job_id": job_id,
                 "sequence": self._sequence,
-                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                 "event": event,
                 "payload": payload,
             }
@@ -124,7 +126,7 @@ def _add_batch_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--crf",
         type=int,
-        choices=range(0, 52),
+        choices=range(52),
         default=DEFAULT_CRF,
         help=f"H.264 constant-quality value; lower is higher quality (default: {DEFAULT_CRF}).",
     )
@@ -202,7 +204,7 @@ def _build_parser() -> argparse.ArgumentParser:
     publish_parser = subparsers.add_parser(
         "publish", help="Publish compressed videos into an ADT website."
     )
-    publish_parser.add_argument("--input", required=True, help="Directory of compressed page_N.mp4 videos.")
+    publish_parser.add_argument("--input", required=True, help="Directory of compressed MP4 videos.")
     publish_parser.add_argument("--book", required=True, help="Source ADT website directory.")
     publish_destination = publish_parser.add_mutually_exclusive_group(required=True)
     publish_destination.add_argument("--output", help="New directory for a published ADT website copy.")
@@ -216,6 +218,35 @@ def _build_parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--recursive", action="store_true", help="Find page videos in nested folders.")
     publish_parser.add_argument("--maximum-bytes", type=int, default=DEFAULT_MAXIMUM_BYTES)
     publish_parser.add_argument("--probe", help="Explicit FFprobe or FFmpeg executable path.")
+    publish_parser.add_argument("--mapping", help="Optional JSON or CSV source-to-ADT-page mapping.")
+    publish_parser.add_argument(
+        "--mode", choices=("merge", "replace"), default="merge",
+        help="Merge with existing mappings or replace them (default: merge).",
+    )
+    publish_parser.add_argument(
+        "--confirm-removals", action="store_true",
+        help="Required when replace mode would remove existing page videos.",
+    )
+
+    publish_plan_parser = subparsers.add_parser(
+        "publish-plan", help="Preview ADT compatibility, page mappings, and exact changes without writing."
+    )
+    publish_plan_parser.add_argument("--input", required=True, help="Directory of compressed MP4 videos.")
+    publish_plan_parser.add_argument("--book", required=True, help="ADT website directory to analyze.")
+    publish_plan_parser.add_argument("--language", help="ADT language code; defaults to config.json.")
+    publish_plan_parser.add_argument("--recursive", action="store_true", help="Find MP4 files in nested folders.")
+    publish_plan_parser.add_argument("--mapping", help="Optional JSON or CSV source-to-ADT-page mapping.")
+    publish_plan_parser.add_argument(
+        "--mode", choices=("merge", "replace"), default="merge",
+        help="Preview safe merging or authoritative replacement (default: merge).",
+    )
+
+    browser_parser = subparsers.add_parser(
+        "browser-test", help="Run responsive sign-video and voice-over checks in headless Chromium."
+    )
+    browser_parser.add_argument(
+        "--browser", help="Optional Chrome, Chromium, or Edge executable path."
+    )
 
     ui_parser = subparsers.add_parser("ui", help="Open the optional desktop interface.")
     ui_parser.add_argument(
@@ -503,6 +534,9 @@ def _publish(options: argparse.Namespace, progress: ProgressEmitter) -> tuple[in
             in_place=options.in_place,
             language=options.language,
             recursive=options.recursive,
+            mapping_file=options.mapping,
+            mode=options.mode,
+            confirm_removals=options.confirm_removals,
             maximum_bytes=options.maximum_bytes,
             probe_path=options.probe,
             progress_callback=progress.emit if progress.enabled else None,
@@ -515,6 +549,45 @@ def _publish(options: argparse.Namespace, progress: ProgressEmitter) -> tuple[in
         f"for {result.language}; bundle version {result.bundle_version}.{package_text}\n"
     )
     return int(ExitCode.SUCCESS), result.to_result_document(), human
+
+
+def _publish_plan(
+    options: argparse.Namespace,
+    _progress: ProgressEmitter,
+) -> tuple[int, dict[str, object], str]:
+    plan: AdtPublishPlan = analyze_adt_publish(
+        options.input,
+        book=options.book,
+        language=options.language,
+        recursive=options.recursive,
+        mapping_file=options.mapping,
+        mode=options.mode,
+    )
+    document = plan.to_dict()
+    document["command"] = "publish-plan"
+    document["ok"] = plan.ready
+    document["exit_code"] = int(ExitCode.SUCCESS if plan.ready else ExitCode.PUBLISH_FAILED)
+    human = (
+        f"ADT preview: {len(plan.videos)} video(s), {len(plan.mutations)} file change(s), "
+        f"{len(plan.removals)} removal(s), {len(plan.blockers)} blocker(s).\n"
+    )
+    return int(document["exit_code"]), document, human
+
+
+def _browser_test(
+    options: argparse.Namespace,
+    _progress: ProgressEmitter,
+) -> tuple[int, dict[str, object], str]:
+    result: BrowserValidationResult = run_browser_contract_tests(options.browser)
+    document = {
+        "schema_version": CONTRACT_SCHEMA_VERSION,
+        "command": "browser-test",
+        "ok": result.passed,
+        "exit_code": int(ExitCode.SUCCESS if result.passed else ExitCode.VALIDATION_FAILED),
+        **result.to_dict(),
+    }
+    human = f"Browser contract passed at {len(result.viewports)} responsive viewport(s).\n"
+    return int(document["exit_code"]), document, human
 
 
 def main(
@@ -564,7 +637,8 @@ def main(
         if options.command == "ui":
             if json_output or progress.enabled:
                 raise InvalidInputError("The interactive UI does not use JSON or progress-stream flags.")
-            from .desktop import run as run_desktop, smoke_test as smoke_test_desktop
+            from .desktop import run as run_desktop
+            from .desktop import smoke_test as smoke_test_desktop
 
             if options.smoke_test:
                 return smoke_test_desktop()
@@ -577,6 +651,8 @@ def main(
             "verify": _verify,
             "resume": _resume,
             "publish": _publish,
+            "publish-plan": _publish_plan,
+            "browser-test": _browser_test,
         }
         exit_code, document, human = operations[options.command](options, progress)
         if json_output:
@@ -591,7 +667,7 @@ def main(
         else:
             errors.write(f"{TOOL_NAME}: {code.name}: {exc}\n")
         return int(code)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - final CLI boundary converts unexpected errors to exit codes.
         code = ExitCode.INTERNAL_ERROR
         if json_output:
             _write_json(output, _error_payload(code, str(exc), type(exc).__name__))

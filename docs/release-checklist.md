@@ -18,8 +18,8 @@
 ## Build a draft release
 
 ```sh
-git tag -a v0.10.0 -m "High2Min Video Compressor 0.10.0"
-git push origin v0.10.0
+git tag -a v0.11.0 -m "High2Min Video Compressor 0.11.0"
+git push origin v0.11.0
 ```
 
 - [ ] Open **Actions → Build release** and wait for all native build jobs and the draft-release job to succeed.
@@ -27,10 +27,15 @@ git push origin v0.10.0
 - [ ] Confirm it contains four archives, four `.sha256` sidecars, `SHA256SUMS.txt`, and a release index.
 - [ ] Download at least the Windows archive and verify its checksum and provenance.
 - [ ] Confirm the Windows application opens and performs a small compression test.
-- [ ] Confirm `High2Min Video Compressor.exe` opens without a terminal and `high2min.exe --version` prints `0.10.0` in PowerShell.
-- [ ] Confirm the automatic startup check and manual update action report that published `0.10.0` is current.
+- [ ] Confirm `High2Min Video Compressor.exe` opens without a terminal and `high2min.exe --version` prints `0.11.0` in PowerShell.
+- [ ] Confirm the automatic startup check and manual update action report that published `0.11.0` is current.
 - [ ] Confirm compression shows no FFmpeg/FFprobe console popups on Windows.
 - [ ] Confirm desktop Publish ADT updates the chosen repo itself and leaves existing ZIP files unchanged.
+- [ ] Confirm **Analyze ADT changes** performs no writes and displays source names, ADT spine pages, destination names, mutations, and removals.
+- [ ] Confirm merge preserves existing page videos and replace refuses removals until they are explicitly confirmed.
+- [ ] Confirm flexible names with one numeric group and JSON/CSV mapping overrides publish to the intended ADT spine pages.
+- [ ] Confirm active/inactive `base.bundle` files, existing helpers, authored CSS/content/audio, and unrelated dirty Git files are byte-identical after publishing.
+- [ ] Run `high2min browser-test --json` and confirm all five responsive viewport contracts pass.
 - [ ] Confirm Publish ADT shows named progress phases through final validation and cleanup rather than stopping near 98%.
 - [ ] Confirm a cancelled pre-commit publication leaves the repository unchanged and a simulated interrupted transaction recovers on retry.
 - [ ] Confirm the published ADT shows the hand-sign control after a fresh browser reload.
@@ -56,4 +61,4 @@ git push origin v0.10.0
 - The archive contains audio, exceeds the intended video limit, or the UI does not open.
 - The release page does not clearly state that Windows and macOS builds are unsigned.
 
-If a problem is found, delete or retain the faulty draft for diagnosis, correct the source, increment the project version, and create a new patch tag such as `v0.10.1`. Do not reuse a release tag or silently replace a published asset.
+If a problem is found, delete or retain the faulty draft for diagnosis, correct the source, increment the project version, and create a new patch tag such as `v0.11.1`. Do not reuse a release tag or silently replace a published asset.

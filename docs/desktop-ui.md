@@ -29,10 +29,12 @@ The interface creates compressed copies in a separate destination and never repl
 - safe stop after currently running encodes;
 - saved-job resume and links to JSON/CSV report locations.
 - separate compression and publishing tabs;
-- ADT website selection, optional language selection, and transactional in-place video publishing.
+- ADT website selection, optional language/mapping selection, merge/replace choice, read-only change preview, and transactional in-place video publishing.
 - a throttled background update check plus a manual **Check for updates** button.
 
-ADT publishing uses the compressed-copy folder as its authoritative input and updates the selected website itself. It first verifies local create/rename/delete permissions and temporary storage. It stages only the chosen language's videos and generated config, runtime, offline-preloader, affected HTML, and manifest files; it does not duplicate the complete website. The hand-sign control remains enabled, and voice-over narration can play together with sign-language video. A durable journal, rename-based commit, final validation, rollback, and automatic interrupted-transaction recovery protect the repository. Real phase percentages, current-file details, safe cancellation before commit, a 30-second no-progress warning, and a durable JSON-lines diagnostic log make slow filesystems visible. Development files and ZIP packages are never changed.
+**Analyze ADT changes** first shows the inferred source filename → ADT spine page → normalized `page_N.mp4` mapping and the exact number of mutations, removals, warnings, and blockers without writing. Merge mode preserves existing mappings and is the default. Replace mode lists removals and asks for confirmation.
+
+Publishing first verifies local create/rename/delete permissions and temporary storage. It stages only allowlisted video-integration files and never modifies active/inactive runtime bundles, authored CSS/content/audio, development files, or ZIP packages. Missing approved helpers keep the hand-sign control visible/touch-draggable and allow voice-over narration and sign-language video to play independently. Baseline hashes detect concurrent edits before commit. A durable journal, individual file renames, semantic final validation, rollback, and interrupted-transaction recovery protect the repository. Real phase percentages, safe cancellation before commit, a no-progress warning, and a JSON-lines diagnostic log make slow filesystems visible.
 
 Resource-analysis failures show disk requirements in MB. When all compression items fail before producing output, the interface removes temporary state and report files and reports that cleanup instead of leaving a resumable job that cannot contain completed work.
 

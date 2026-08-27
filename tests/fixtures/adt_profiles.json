@@ -1,0 +1,12 @@
+[
+  {"name":"geography-standard-5","language":"en-GB","joined_href":false,"existing_video":true,"helpers":"all","offline":"var","inactive_bundle":true,"bundle_version":"3","manifest_comment":true,"extra_files":150},
+  {"name":"writing-standard-1","language":"en-GB","joined_href":false,"existing_video":false,"helpers":"partial","offline":"const","inactive_bundle":false,"bundle_version":"25","manifest_comment":false,"extra_files":0},
+  {"name":"learn-english-standard-2-english","language":"en-GB","joined_href":false,"existing_video":false,"helpers":"all","offline":"let","inactive_bundle":false,"bundle_version":"66","manifest_comment":false,"extra_files":20},
+  {"name":"learn-english-standard-2-kiswahili","language":"en-GB","joined_href":true,"existing_video":false,"helpers":"partial","offline":"var","inactive_bundle":false,"bundle_version":"202","manifest_comment":true,"extra_files":0},
+  {"name":"geography-standard-3","language":"en-GB","joined_href":false,"existing_video":true,"helpers":"all","offline":"const","inactive_bundle":true,"bundle_version":"114","manifest_comment":false,"extra_files":10},
+  {"name":"health-standard-1","language":"en-GB","joined_href":false,"existing_video":true,"helpers":"all","offline":"var","inactive_bundle":false,"bundle_version":"61","manifest_comment":false,"extra_files":0},
+  {"name":"kuandika-standard-2","language":"sw-TZ","joined_href":true,"existing_video":true,"helpers":"all","offline":"let","inactive_bundle":false,"bundle_version":"96","manifest_comment":true,"extra_files":5},
+  {"name":"utamaduni-standard-2","language":"sw-TZ","joined_href":true,"existing_video":true,"helpers":"all","offline":"const","inactive_bundle":false,"bundle_version":"59","manifest_comment":false,"extra_files":0},
+  {"name":"utamaduni-standard-1","language":"sw-TZ","joined_href":false,"existing_video":false,"helpers":"partial","offline":"var","inactive_bundle":false,"bundle_version":null,"manifest_comment":false,"extra_files":0},
+  {"name":"writing-standard-2","language":"en-GB","joined_href":false,"existing_video":false,"helpers":"all","offline":"let","inactive_bundle":false,"bundle_version":"release-113","manifest_comment":true,"extra_files":0}
+]

@@ -5,19 +5,19 @@ import json
 import tempfile
 import threading
 import unittest
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-import xml.etree.ElementTree as ET
 
+from adt_video_publisher import publishing
 from adt_video_publisher.errors import (
     InvalidInputError,
     PublishFailedError,
     PublishingInterruptedError,
     ResourceLimitError,
 )
-from adt_video_publisher import publishing
 from adt_video_publisher.publishing import (
     ADLCP_NAMESPACE,
     IMS_NAMESPACE,
@@ -32,7 +32,7 @@ from adt_video_publisher.publishing import (
 
 def hash_tree(root: Path) -> str:
     digest = hashlib.sha256()
-    for path in sorted((item for item in root.rglob("*") if item.is_file())):
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         digest.update(path.read_bytes())
     return digest.hexdigest()
@@ -66,14 +66,15 @@ def write_manifest(root: Path) -> None:
     tree.write(root / "imsmanifest.xml", encoding="utf-8", xml_declaration=True)
 
 
-def make_book(root: Path, *, bundle_version: object = "7") -> Path:
+def make_book(root: Path, *, bundle_version: object = "7", existing_video: bool = False) -> Path:
     book = root / "book"
     (book / "assets").mkdir(parents=True)
     language = book / "content" / "i18n" / "en-GB"
     (language / "video").mkdir(parents=True)
-    (book / "index.html").write_text("<title>Test</title>", encoding="utf-8")
-    (book / "pg002.html").write_text("page two", encoding="utf-8")
-    (book / "pg003.html").write_text("page three", encoding="utf-8")
+    runtime_tag = '<script src="./assets/base.bundle.local.js?v=7"></script>'
+    (book / "index.html").write_text(f"<head><title>Test</title></head>{runtime_tag}", encoding="utf-8")
+    (book / "pg002.html").write_text(f"<head></head>page two{runtime_tag}", encoding="utf-8")
+    (book / "pg003.html").write_text(f"<head></head>page three{runtime_tag}", encoding="utf-8")
     (book / "assets" / "config.json").write_text(
         json.dumps(
             {
@@ -107,10 +108,10 @@ def make_book(root: Path, *, bundle_version: object = "7") -> Path:
         ),
         encoding="utf-8",
     )
-    (language / "videos.json").write_text(
-        json.dumps({"video-2": "page_2.mp4"}), encoding="utf-8"
-    )
-    (language / "video" / "page_2.mp4").write_bytes(b"old-video")
+    existing_mappings = {"video-2": "page_2.mp4"} if existing_video else {}
+    (language / "videos.json").write_text(json.dumps(existing_mappings), encoding="utf-8")
+    if existing_video:
+        (language / "video" / "page_2.mp4").write_bytes(b"old-video")
     (book / "AGENTS.md").write_text("development only", encoding="utf-8")
     write_manifest(book)
     return book
@@ -123,11 +124,146 @@ def read_offline_inline(preloader: Path) -> dict[str, object]:
     end = source.index(";\n  var BASE_DIR", start)
     payload = json.loads(source[start:end])
     if not isinstance(payload, dict):
-        raise AssertionError("offline preloader INLINE payload is not an object")
+        raise TypeError("offline preloader INLINE payload is not an object")
     return payload
 
 
 class PublishingTests(unittest.TestCase):
+    def test_inline_scanner_handles_const_spacing_and_braces_inside_strings(self) -> None:
+        source = 'const INLINE =  {"./index.html":"a } brace and \\\"quote\\\""};\nlet BASE_DIR="";'
+        start, end = publishing._inline_json_span(source)
+        self.assertEqual(
+            json.loads(source[start:end]),
+            {"./index.html": 'a } brace and "quote"'},
+        )
+
+    def test_manifest_patch_preserves_comments_order_and_unrelated_attributes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            manifest = book / "imsmanifest.xml"
+            source = manifest.read_text(encoding="utf-8")
+            source = source.replace(
+                "<resources>",
+                '<resources data-preserve="yes">\n    <!-- authored manifest comment -->',
+            )
+            manifest.write_text(source, encoding="utf-8", newline="\r\n")
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            updated = manifest.read_text(encoding="utf-8")
+            self.assertIn('data-preserve="yes"', updated)
+            self.assertIn("<!-- authored manifest comment -->", updated)
+            self.assertLess(updated.index('href="index.html"'), updated.index('href="pg002.html"'))
+
+    def test_cache_query_preserves_other_parameters_and_fragment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            index = book / "index.html"
+            index.write_text(
+                '<head></head><script src="./assets/offline-preloader.js?theme=dark&v=7#boot"></script>'
+                '<script src="./assets/base.bundle.local.js?theme=dark#reader"></script>',
+                encoding="utf-8",
+            )
+            (book / "assets" / "offline-preloader.js").write_text(
+                'const INLINE={"./index.html":"old"}; const BASE_DIR="";',
+                encoding="utf-8",
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            updated = index.read_text(encoding="utf-8")
+            self.assertIn("offline-preloader.js?theme=dark&v=8#boot", updated)
+            self.assertIn("base.bundle.local.js?theme=dark&v=8#reader", updated)
+
+    def test_merge_mode_preserves_existing_mappings_and_unrelated_video_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root, existing_video=True)
+            marker = book / "content" / "i18n" / "en-GB" / "video" / "notes.txt"
+            marker.write_text("preserve me", encoding="utf-8")
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "lesson 1.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            mappings = json.loads((book / "content" / "i18n" / "en-GB" / "videos.json").read_text())
+            self.assertEqual(mappings, {"video-1": "page_1.mp4", "video-2": "page_2.mp4"})
+            self.assertEqual(marker.read_text(encoding="utf-8"), "preserve me")
+
+    def test_replace_mode_requires_explicit_confirmation_for_removals(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root, existing_video=True)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            before = hash_tree(book)
+
+            with self.assertRaisesRegex(InvalidInputError, "confirm_removals"):
+                publish_adt(
+                    videos,
+                    book=book,
+                    in_place=True,
+                    mode="replace",
+                    validate_media=False,
+                )
+
+            self.assertEqual(hash_tree(book), before)
+
+    def test_concurrent_target_edit_aborts_before_overwriting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            actual_sync = publishing._synchronize_offline_preloader
+
+            def introduce_concurrent_edit(*args: object, **kwargs: object) -> tuple[Path, ...]:
+                result = actual_sync(*args, **kwargs)  # type: ignore[arg-type]
+                (book / "assets" / "config.json").write_text("concurrent edit", encoding="utf-8")
+                return result
+
+            with patch(
+                "adt_video_publisher.publishing._synchronize_offline_preloader",
+                side_effect=introduce_concurrent_edit,
+            ), self.assertRaisesRegex(PublishFailedError, "Concurrent edit"):
+                publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            self.assertEqual((book / "assets" / "config.json").read_text(), "concurrent edit")
+            self.assertFalse((book / "content" / "i18n" / "en-GB" / "video" / "page_1.mp4").exists())
+            self.assertEqual(list(root.glob(".*.adt-publish-*")), [])
+
+    def test_inactive_runtime_and_repository_zip_are_byte_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            inactive = book / "assets" / "base.bundle.min.js"
+            inactive.write_bytes(b"unknown inactive runtime")
+            archive = book / "legacy-scrum.zip"
+            archive.write_bytes(b"never touch this package")
+            write_manifest(book)
+            before_runtime = inactive.read_bytes()
+            before_zip = archive.read_bytes()
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            self.assertEqual(inactive.read_bytes(), before_runtime)
+            self.assertEqual(archive.read_bytes(), before_zip)
+
     def test_staged_video_copy_does_not_force_per_file_disk_sync(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -320,9 +456,8 @@ class PublishingTests(unittest.TestCase):
             with patch(
                 "adt_video_publisher.publishing._atomic_write_probe",
                 side_effect=PublishFailedError("simulated read-only repository"),
-            ):
-                with self.assertRaisesRegex(PublishFailedError, "read-only"):
-                    publish_adt(videos, book=book, in_place=True, validate_media=False)
+            ), self.assertRaisesRegex(PublishFailedError, "read-only"):
+                publish_adt(videos, book=book, in_place=True, validate_media=False)
 
             self.assertEqual(hash_tree(book), before)
 
@@ -338,14 +473,13 @@ class PublishingTests(unittest.TestCase):
             with patch(
                 "adt_video_publisher.publishing.shutil.disk_usage",
                 return_value=SimpleNamespace(free=1024),
-            ):
-                with self.assertRaises(ResourceLimitError) as raised:
-                    publish_adt(
-                        videos,
-                        book=book,
-                        in_place=True,
-                        validate_media=False,
-                    )
+            ), self.assertRaises(ResourceLimitError) as raised:
+                publish_adt(
+                    videos,
+                    book=book,
+                    in_place=True,
+                    validate_media=False,
+                )
 
             message = str(raised.exception)
             self.assertIn("MB", message)
@@ -470,7 +604,7 @@ class PublishingTests(unittest.TestCase):
     def test_in_place_publish_updates_repo_and_never_touches_zip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            book = make_book(root)
+            book = make_book(root, existing_video=True)
             videos = root / "compressed"
             videos.mkdir()
             (videos / "page_1.mp4").write_bytes(b"compressed-one")
@@ -482,6 +616,8 @@ class PublishingTests(unittest.TestCase):
                 videos,
                 book=book,
                 in_place=True,
+                mode="replace",
+                confirm_removals=True,
                 validate_media=False,
             )
 
@@ -493,15 +629,13 @@ class PublishingTests(unittest.TestCase):
             self.assertTrue(config["features"]["signLanguage"])
             self.assertTrue(config["features"]["readAloud"])
             runtime = (book / "assets" / "base.bundle.local.js").read_text(encoding="utf-8")
-            self.assertIn('onPlay:()=>{}', runtime)
-            self.assertNotIn('a("sign-language")', runtime)
-            self.assertNotIn('n==="tts"&&d.current?.pause()', runtime)
-            self.assertNotIn('l==="sign-language"&&(R(),r(!1),s(0),b(!1))', runtime)
-            self.assertIn(
-                'u("tts"),r(!0),document.querySelectorAll("video[autoplay]").forEach',
-                runtime,
-            )
-            self.assertNotIn('document.querySelectorAll("video").forEach', runtime)
+            self.assertIn('onPlay:()=>a("sign-language")', runtime)
+            self.assertTrue((book / "assets" / "media-playback-independence.js").is_file())
+            self.assertTrue((book / "assets" / "sign-language-video.js").is_file())
+            self.assertTrue((book / "assets" / "sign-language-video.css").is_file())
+            updated_index = (book / "index.html").read_text(encoding="utf-8")
+            self.assertLess(updated_index.index("media-playback-independence.js"), updated_index.index("base.bundle.local.js"))
+            self.assertLess(updated_index.index("base.bundle.local.js"), updated_index.index("sign-language-video.js"))
             mappings = json.loads(
                 (book / "content" / "i18n" / "en-GB" / "videos.json").read_text()
             )
@@ -559,14 +693,13 @@ class PublishingTests(unittest.TestCase):
             with patch(
                 "adt_video_publisher.publishing.validate_adt_website",
                 side_effect=fail_final_validation,
-            ):
-                with self.assertRaises(PublishFailedError):
-                    publish_adt(
-                        videos,
-                        book=book,
-                        in_place=True,
-                        validate_media=False,
-                    )
+            ), self.assertRaises(PublishFailedError):
+                publish_adt(
+                    videos,
+                    book=book,
+                    in_place=True,
+                    validate_media=False,
+                )
 
             self.assertEqual(hash_tree(book), before)
             self.assertEqual(list(root.glob(".*.adt-publish-*")), [])
@@ -595,7 +728,7 @@ class PublishingTests(unittest.TestCase):
     def test_publish_is_authoritative_transactional_and_packaged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            book = make_book(root)
+            book = make_book(root, existing_video=True)
             videos = root / "compressed"
             videos.mkdir()
             (videos / "page_1.mp4").write_bytes(b"compressed-one")
@@ -611,6 +744,8 @@ class PublishingTests(unittest.TestCase):
                 book=book,
                 output=output,
                 package=package,
+                mode="replace",
+                confirm_removals=True,
                 validate_media=False,
                 progress_callback=lambda _job, event, _payload: events.append(event),
             )
@@ -629,7 +764,8 @@ class PublishingTests(unittest.TestCase):
             published_runtime = (output / "assets" / "base.bundle.local.js").read_text(
                 encoding="utf-8"
             )
-            self.assertIn("onPlay:()=>{}", published_runtime)
+            self.assertIn('onPlay:()=>a("sign-language")', published_runtime)
+            self.assertTrue((output / "assets" / "media-playback-independence.js").is_file())
             package_report = validate_deployment_package(package)
             self.assertEqual(package_report["entry_count"], len(declared_manifest_files(output / "imsmanifest.xml")) + 1)
             checksum = Path(str(package) + ".sha256").read_text(encoding="ascii")
@@ -650,30 +786,32 @@ class PublishingTests(unittest.TestCase):
             self.assertEqual(first_hash, second_hash)
             self.assertEqual(first.read_bytes(), second.read_bytes())
 
-    def test_failure_removes_staging_and_leaves_every_source_unchanged(self) -> None:
+    def test_nonstandard_bundle_version_uses_dedicated_cache_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             book = make_book(root, bundle_version="release-seven")
             videos = root / "compressed"
             videos.mkdir()
             (videos / "page_1.mp4").write_bytes(b"video")
-            before = hash_tree(root)
+            before = hash_tree(book)
             output = root / "published"
             package = root / "book.zip"
 
-            with self.assertRaises(PublishFailedError):
-                publish_adt(
-                    videos,
-                    book=book,
-                    output=output,
-                    package=package,
-                    validate_media=False,
-                )
+            result = publish_adt(
+                videos,
+                book=book,
+                output=output,
+                package=package,
+                validate_media=False,
+            )
 
-            self.assertFalse(output.exists())
-            self.assertFalse(package.exists())
-            self.assertFalse(Path(str(package) + ".sha256").exists())
-            self.assertEqual(hash_tree(root), before)
+            self.assertEqual(result.bundle_version, "h2m-1")
+            config = json.loads((output / "assets" / "config.json").read_text())
+            self.assertEqual(config["bundleVersion"], "release-seven")
+            self.assertEqual(config["high2minCacheVersion"], 1)
+            self.assertTrue(package.exists())
+            self.assertTrue(Path(str(package) + ".sha256").exists())
+            self.assertEqual(hash_tree(book), before)
             self.assertEqual(list(root.glob(".*.adt-publish-*.tmp")), [])
 
     def test_video_names_allow_sparse_pages_but_reject_bad_mappings(self) -> None:

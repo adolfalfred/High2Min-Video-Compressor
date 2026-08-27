@@ -10,9 +10,9 @@ These certificate-free binaries are built on native GitHub-hosted runners and pu
 
 Maintainers can follow the [certificate-free release checklist](docs/release-checklist.md) to build and publish a new version.
 
-The active 0.10.0 development plan is documented in [Flexible video ordering and in-app updates](docs/v0.10.0-implementation-plan.md).
+The active 0.11.0 development plan is documented in [Safe ADT publishing compatibility](docs/v0.11.0-implementation-plan.md).
 
-Version 0.10.0 is the active development line and retains the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages. FFmpeg and FFprobe remain hidden during Windows desktop jobs, so compression does not flash console windows.
+Version 0.11.0 is the active development line and retains the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages. FFmpeg and FFprobe remain hidden during Windows desktop jobs, so compression does not flash console windows.
 
 The desktop app checks the latest public GitHub release in the background at startup, at most once every 24 hours after a successful check. When a newer stable version exists, it asks before opening the verified GitHub release page; it never silently replaces its own files. Offline automatic checks stay silent, and **Check for updates** provides an immediate manual check.
 
@@ -42,17 +42,28 @@ python -m adt_video_publisher resume --job "D:\videos-compressed\.adt-video-job.
 python -m adt_video_publisher verify --input "D:\videos-compressed" --json
 ```
 
-Update an ADT website repo itself with compressed `page_N.mp4` videos without creating or modifying a ZIP:
+Preview an ADT update without changing any file. Each MP4 filename may contain any words, but its stem must contain exactly one positive number; that number is the ADT spine position. Use `--mapping pages.json` or `--mapping pages.csv` when source/PDF numbering differs from the website spine:
+
+```powershell
+python -m adt_video_publisher publish-plan `
+  --input "D:\videos-compressed" `
+  --book "D:\book-adt" `
+  --mode merge `
+  --json
+```
+
+Update the ADT website itself without creating or modifying a ZIP:
 
 ```powershell
 python -m adt_video_publisher publish `
   --input "D:\videos-compressed" `
   --book "D:\book-adt" `
   --in-place `
+  --mode merge `
   --json --progress ndjson
 ```
 
-The desktop Publish ADT step always uses this in-place mode. It stages and validates only files that can change instead of copying the complete website. Before work begins, it verifies create/rename/delete permissions and calculates temporary storage from the real transaction. It keeps the hand-sign video control enabled, refreshes generated offline-preloader data and cache versions, and makes sign-language video independent from voice-over narration so both can play together. A durable journal and same-filesystem renames provide rollback and automatic recovery after interruption. Real phase progress, safe pre-commit cancellation, stall detection, and a diagnostic log keep the final publishing stages observable. Repository/development files and existing ZIP packages remain untouched.
+The desktop Publish ADT step always uses this in-place mode and offers a read-only **Analyze ADT changes** preview first. Merge mode preserves existing page videos. Replace mode lists removals and requires explicit confirmation. Publishing stages only allowlisted files, verifies baseline hashes immediately before commit, and aborts if another process changes a target. It never rewrites `base.bundle` files or authored CSS. Existing approved helpers are preserved; missing media-independence and draggable sign-player adapters are installed in a validated order. A durable journal, same-filesystem file renames, final semantic validation, rollback, and automatic recovery protect the repository. Repository/development files and existing ZIP packages remain byte-identical.
 
 Insufficient-storage errors report required and available capacity in MB. If every compression item fails before any output is produced, High2Min removes the temporary job state and report files so the failed job does not block a clean retry.
 
@@ -67,7 +78,15 @@ python -m adt_video_publisher publish `
   --json --progress ndjson
 ```
 
-The compressed folder is authoritative for `videos.json`; sparse page mappings are supported. Both modes enable sign language, increment `bundleVersion`, rebuild `imsmanifest.xml`, and validate the production website. The separate-copy CLI mode can also write an exact-manifest ZIP and its `.sha256` sidecar.
+Sparse page mappings are supported. Merge mode combines them with existing mappings; replace mode is authoritative only when explicitly selected and confirmed. Publishing enables sign language and read-aloud, advances a compatible cache version, updates only targeted manifest entries while preserving comments/order, refreshes quote-aware offline-preloader data, and validates the production website. The separate-copy CLI mode can also write an exact-manifest ZIP and its `.sha256` sidecar.
+
+Run the real-browser compatibility contract on Chrome, Chromium, or Edge:
+
+```powershell
+python -m adt_video_publisher browser-test --json
+```
+
+It checks 320, 390, 767, 1024, and 1440 pixel viewports, one-row controls, visible/draggable sign video, explicit close behavior, and independent narration/video playback in both orders.
 
 With `--json`, the final result is written to stdout. With `--progress ndjson`, structured progress events are written independently to stderr.
 

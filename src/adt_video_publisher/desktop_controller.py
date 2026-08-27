@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
+from .adt_planning import AdtPublishPlan, analyze_adt_publish
 from .batch import BatchRunResult, ProgressCallback, load_resume_request, run_batch
 from .compression import (
     DEFAULT_CRF,
@@ -21,7 +22,12 @@ from .errors import InvalidInputError
 from .paths import BatchPathPlan, build_path_plan
 from .planning import DEFAULT_MAXIMUM_BYTES
 from .publishing import PublishResult, publish_adt
-from .resources import ResourceSnapshot, WorkerPlan, detect_resources, select_worker_plan
+from .resources import (
+    ResourceSnapshot,
+    WorkerPlan,
+    detect_resources,
+    select_worker_plan,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +56,9 @@ class DesktopPublishSettings:
     in_place: bool = False
     language: str | None = None
     recursive: bool = False
+    mapping_file: str | None = None
+    mode: str = "merge"
+    confirm_removals: bool = False
     maximum_bytes: int = DEFAULT_MAXIMUM_BYTES
     probe_path: str | None = None
     diagnostic_log: str | None = None
@@ -103,12 +112,14 @@ class DesktopController:
         worker_selector: Callable[..., WorkerPlan] = select_worker_plan,
         batch_runner: Callable[..., BatchRunResult] = run_batch,
         publisher: Callable[..., PublishResult] = publish_adt,
+        publish_analyzer: Callable[..., AdtPublishPlan] = analyze_adt_publish,
     ) -> None:
         self.path_planner = path_planner
         self.resource_detector = resource_detector
         self.worker_selector = worker_selector
         self.batch_runner = batch_runner
         self.publisher = publisher
+        self.publish_analyzer = publish_analyzer
 
     def analyze(self, settings: DesktopSettings) -> AnalysisSummary:
         plan = self.path_planner(
@@ -197,6 +208,9 @@ class DesktopController:
                 in_place=settings.in_place,
                 language=settings.language or None,
                 recursive=settings.recursive,
+                mapping_file=settings.mapping_file,
+                mode=settings.mode,
+                confirm_removals=settings.confirm_removals,
                 maximum_bytes=settings.maximum_bytes,
                 probe_path=settings.probe_path,
                 cancel_event=cancel_event,
@@ -209,6 +223,16 @@ class DesktopController:
                 {"error_type": type(exc).__name__, "error": str(exc)},
             )
             raise
+
+    def analyze_publish(self, settings: DesktopPublishSettings) -> AdtPublishPlan:
+        return self.publish_analyzer(
+            settings.videos,
+            book=settings.book,
+            language=settings.language or None,
+            recursive=settings.recursive,
+            mapping_file=settings.mapping_file,
+            mode=settings.mode,
+        )
 
 
 def suggested_output(source: str) -> str:
