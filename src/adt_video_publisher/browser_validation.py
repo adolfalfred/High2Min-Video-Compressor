@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from typing import Final
 from .errors import PublishFailedError
 
 VIEWPORTS: Final = ((320, 640), (390, 844), (767, 900), (1024, 768), (1440, 900))
+RESULT_MARKER: Final = 'data-high2min-browser-result="'
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +141,75 @@ window.addEventListener("unhandledrejection",function(event){document.body.setAt
 </script></body></html>"""
 
 
+def _stop_browser_process(process: subprocess.Popen[bytes]) -> None:
+    """Stop Chrome and its descendants without leaving a headless process behind."""
+
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.kill()
+        process.wait(timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        if process.poll() is None:
+            try:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=3)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+
+def _decoded_output(value: bytes | str | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
+def _run_browser_command(command: list[str], *, timeout: float = 30) -> subprocess.CompletedProcess[str]:
+    """Capture a complete DOM even when macOS Chrome does not exit after ``--dump-dom``."""
+
+    process_options: dict[str, object] = {}
+    if os.name == "posix":
+        process_options["start_new_session"] = True
+    elif sys.platform == "win32":
+        process_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **process_options,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        partial_stdout = _decoded_output(exc.output)
+        partial_stderr = _decoded_output(exc.stderr)
+        _stop_browser_process(process)
+        try:
+            final_stdout, final_stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            final_stdout, final_stderr = b"", b""
+        output = _decoded_output(final_stdout) or partial_stdout
+        error_output = _decoded_output(final_stderr) or partial_stderr
+        if RESULT_MARKER in output:
+            return subprocess.CompletedProcess(command, 0, stdout=output, stderr=error_output)
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output=output,
+            stderr=error_output,
+        ) from exc
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout=_decoded_output(stdout),
+        stderr=_decoded_output(stderr),
+    )
+
+
 def run_browser_contract_tests(
     browser_path: str | os.PathLike[str] | None = None,
     *,
@@ -178,15 +249,7 @@ def run_browser_contract_tests(
             if sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0:
                 command.insert(1, "--no-sandbox")
             try:
-                completed = subprocess.run(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=30,
-                    check=False,
-                )
+                completed = _run_browser_command(command)
             except (OSError, subprocess.SubprocessError) as exc:
                 raise PublishFailedError(f"Headless browser validation could not run: {exc}") from exc
             match = re.search(
