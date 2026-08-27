@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
 import unittest
+from unittest import mock
 
 from adt_video_publisher.browser_validation import (
     _run_browser_command,
@@ -12,7 +14,22 @@ from adt_video_publisher.browser_validation import (
 )
 
 
+def _run_real_browser_in_this_job() -> bool:
+    """Run the platform-neutral browser contract once in the Windows CI job."""
+
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true" and sys.platform != "win32":
+        return False
+    return find_chromium() is not None
+
+
 class BrowserValidationTests(unittest.TestCase):
+    def test_real_browser_contract_runs_only_once_in_ci_matrix(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}),
+            mock.patch.object(sys, "platform", "darwin"),
+        ):
+            self.assertFalse(_run_real_browser_in_this_job())
+
     def test_complete_dump_is_recovered_when_browser_does_not_exit(self) -> None:
         script = (
             "import time; "
@@ -32,7 +49,10 @@ class BrowserValidationTests(unittest.TestCase):
                 timeout=0.2,
             )
 
-    @unittest.skipUnless(find_chromium(), "Chrome, Chromium, or Edge is not installed")
+    @unittest.skipUnless(
+        _run_real_browser_in_this_job(),
+        "The real browser contract runs once on Windows CI, or locally when Chromium is installed",
+    )
     def test_accessibility_assets_pass_mobile_browser_contract(self) -> None:
         result = run_browser_contract_tests(viewports=((320, 640),))
         self.assertTrue(result.passed)
