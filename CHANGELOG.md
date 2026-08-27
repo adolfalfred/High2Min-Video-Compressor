@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.11.0 - Unreleased
+## 0.11.0 - 2026-08-27
 
 - Add a read-only ADT compatibility and exact-change preview to the CLI and desktop UI.
 - Accept flexible video filenames with one positive numeric group and optional JSON/CSV page maps.
@@ -13,7 +13,7 @@
 - Add semantic staging/final validation plus a real Chromium mobile/desktop accessibility contract.
 - Add ten compact fixtures representing the ADT repository profiles used during responsiveness work.
 
-## 0.10.0 - 2026-08-27
+## 0.10.0 - 2026-08-22
 
 - Reserve the next development version for flexible number-based video ordering and verified in-app platform downloads.
 - Document the safety, platform-selection, progress, cancellation, integrity-verification, and regression-test requirements before implementation.
