@@ -946,23 +946,34 @@ def create_application(
                 self._append_log(message)
                 if self.active_diagnostic_log:
                     self._append_log(f"Publishing diagnostic log: {self.active_diagnostic_log}")
-                messagebox.showinfo("Publishing stopped safely", message, parent=self.root)
-                self._finish_task()
+                close_requested = self.close_requested
+                self._mark_task_finished()
+                if close_requested:
+                    self.root.destroy()
+                else:
+                    messagebox.showinfo("Publishing stopped safely", message, parent=self.root)
                 return
             self.status_var.set(f"Task failed: {message}")
             self._append_log(f"Error: {message}")
             if self.active_kind == "publishing" and self.active_diagnostic_log:
                 self._append_log(f"Publishing diagnostic log: {self.active_diagnostic_log}")
                 message = f"{message}\n\nDiagnostic log:\n{self.active_diagnostic_log}"
-            messagebox.showerror("High2Min Video Compressor", message, parent=self.root)
-            self._finish_task()
+            close_requested = self.close_requested
+            self._mark_task_finished()
+            if close_requested:
+                self.root.destroy()
+            else:
+                messagebox.showerror("High2Min Video Compressor", message, parent=self.root)
 
         def _finish_task(self) -> None:
+            self._mark_task_finished()
+            if self.close_requested:
+                self.root.destroy()
+
+        def _mark_task_finished(self) -> None:
             self.busy = False
             self.active_kind = ""
             self._set_controls_busy(False)
-            if self.close_requested:
-                self.root.destroy()
 
         def _set_controls_busy(self, busy: bool) -> None:
             normal = "disabled" if busy else "normal"

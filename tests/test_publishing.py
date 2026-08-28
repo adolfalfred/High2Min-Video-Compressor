@@ -208,6 +208,90 @@ class PublishingTests(unittest.TestCase):
             self.assertIn("offline-preloader.js?theme=dark&v=8#boot", updated)
             self.assertIn("base.bundle.local.js?theme=dark&v=8#reader", updated)
 
+    def test_publish_recovers_mixed_active_preloaders_from_valid_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            config = json.loads((book / "assets" / "config.json").read_text(encoding="utf-8"))
+            payload = {
+                "./assets/config.json": config,
+                "./content/pages.json": json.loads(
+                    (book / "content" / "pages.json").read_text(encoding="utf-8")
+                ),
+                "./content/i18n/en-GB/videos.json": {},
+            }
+            fixed = book / "assets" / "offline-preloader-fixed.js"
+            fixed.write_text(
+                "var INLINE = "
+                + json.dumps(payload, separators=(",", ":"))
+                + ";\n  var BASE_DIR = \"\";\n  const KEEP_FIXED = true;\n",
+                encoding="utf-8",
+            )
+            broken = book / "assets" / "offline-preloader.js"
+            broken.write_text(
+                'var INLINE = {"./assets/config.json":{}"broken":true};\n'
+                '  var BASE_DIR = "";\n  const KEEP_LEGACY = true;\n',
+                encoding="utf-8",
+            )
+            for href, preloader in (
+                ("index.html", "offline-preloader-fixed.js"),
+                ("pg002.html", "offline-preloader-fixed.js"),
+                ("pg003.html", "offline-preloader.js"),
+            ):
+                page = book / href
+                page.write_text(
+                    page.read_text(encoding="utf-8")
+                    + f'<script src="./assets/{preloader}?v=7"></script>',
+                    encoding="utf-8",
+                )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            item_statuses: list[str] = []
+
+            publish_adt(
+                videos,
+                book=book,
+                in_place=True,
+                validate_media=False,
+                progress_callback=lambda _job, event, value: (
+                    item_statuses.append(str(value.get("status")))
+                    if event == "item_completed"
+                    else None
+                ),
+            )
+
+            fixed_inline = read_offline_inline(fixed)
+            repaired_inline = read_offline_inline(broken)
+            current_config = json.loads(
+                (book / "assets" / "config.json").read_text(encoding="utf-8")
+            )
+            current_videos = json.loads(
+                (book / "content" / "i18n" / "en-GB" / "videos.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            for inline in (fixed_inline, repaired_inline):
+                self.assertEqual(inline["./assets/config.json"], current_config)
+                self.assertEqual(
+                    inline["./content/i18n/en-GB/videos.json"], current_videos
+                )
+            self.assertIn("KEEP_FIXED", fixed.read_text(encoding="utf-8"))
+            self.assertIn("KEEP_LEGACY", broken.read_text(encoding="utf-8"))
+            self.assertIn(
+                "offline-preloader-fixed.js?v=8",
+                (book / "index.html").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "offline-preloader.js?v=8",
+                (book / "pg003.html").read_text(encoding="utf-8"),
+            )
+            declared = declared_manifest_files(book / "imsmanifest.xml")
+            self.assertIn("assets/offline-preloader-fixed.js", declared)
+            self.assertIn("assets/offline-preloader.js", declared)
+            self.assertEqual(item_statuses, ["staged"])
+
     def test_merge_mode_preserves_existing_mappings_and_unrelated_video_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

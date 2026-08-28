@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.3 - 2026-08-28
+
+- Discover every offline preloader referenced by active ADT pages, including renamed variants such as `offline-preloader-fixed.js`.
+- Safely recover a corrupt active INLINE resource map from the most widely used valid active sibling while preserving each JavaScript wrapper byte-for-byte outside the map.
+- Synchronize, cache-version, manifest, and validate all active preloaders instead of assuming one hard-coded filename.
+- Block publishing during the read-only ADT preview when invalid preloader data has no trustworthy recovery source.
+- Stop the desktop stall monitor before showing publishing error dialogs and label pre-commit video copies as staged rather than published.
+
 ## 0.11.2 - 2026-08-28
 
 - Recover active pages and offline reader resources omitted from legacy ADT manifests.

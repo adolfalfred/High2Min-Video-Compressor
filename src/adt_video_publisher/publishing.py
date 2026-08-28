@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -58,7 +59,6 @@ ESSENTIAL_SITE_RELATIVES: Final = (
     Path("index.html"),
     Path("assets") / "config.json",
     Path("content") / "pages.json",
-    OFFLINE_PRELOADER_RELATIVE,
 )
 TRANSACTION_SCHEMA_VERSION: Final = 1
 RUNTIME_SCRIPT_PATTERN: Final = re.compile(
@@ -66,7 +66,7 @@ RUNTIME_SCRIPT_PATTERN: Final = re.compile(
     r'(?P<query>\?[^#"\'<>\s]*)?(?P<fragment>#[^"\'<>\s]*)?'
 )
 OFFLINE_SCRIPT_PATTERN: Final = re.compile(
-    r'(?P<path>(?:\./)?assets/offline-preloader\.js)'
+    r'(?P<path>(?:\.\./|\./)*assets/offline-preloader(?:[-._][A-Za-z0-9_-]+)*\.js)'
     r'(?P<query>\?[^#"\'<>\s]*)?(?P<fragment>#[^"\'<>\s]*)?'
 )
 
@@ -549,6 +549,7 @@ def _copy_in_place_stage_sources(
     declared: tuple[str, ...],
     page_hrefs: tuple[str, ...],
     offline_resource_files: tuple[str, ...],
+    active_offline_preloaders: tuple[str, ...],
     language: str,
     active_runtime_files: tuple[str, ...],
     reporter: _PublishReporter,
@@ -557,10 +558,11 @@ def _copy_in_place_stage_sources(
 
     required = {
         Path("assets") / "config.json",
-        OFFLINE_PRELOADER_RELATIVE,
         Path("imsmanifest.xml"),
         Path("content") / "i18n" / language / "videos.json",
     }
+    for relative_text in active_offline_preloaders:
+        required.add(Path(*PurePosixPath(relative_text).parts))
     for relative_text in declared:
         relative = Path(*PurePosixPath(relative_text).parts)
         if relative.suffix.lower() == ".html":
@@ -664,6 +666,7 @@ def _update_in_place_manifest(
     declared: tuple[str, ...],
     page_hrefs: tuple[str, ...],
     offline_resource_files: tuple[str, ...],
+    active_offline_preloaders: tuple[str, ...],
     videos: tuple[PageVideo, ...],
     mode: str,
 ) -> tuple[str, ...]:
@@ -675,6 +678,7 @@ def _update_in_place_manifest(
     }
     files.update(page_hrefs)
     files.update(offline_resource_files)
+    files.update(active_offline_preloaders)
     if mode == "replace":
         files = {relative for relative in files if not relative.casefold().startswith(prefix)}
     files.update(f"content/i18n/{language}/video/{item.filename}" for item in videos)
@@ -781,12 +785,13 @@ def _copy_manifest_site(
     skip_prefix: str | None,
     page_hrefs: tuple[str, ...],
     offline_resource_files: tuple[str, ...],
+    active_offline_preloaders: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
 ) -> None:
     declared = declared_manifest_files(source / "imsmanifest.xml")
     required = list(declared)
     seen = {relative.casefold() for relative in required}
-    for relative in (*page_hrefs, *offline_resource_files):
+    for relative in (*page_hrefs, *offline_resource_files, *active_offline_preloaders):
         if relative.casefold() not in seen:
             required.append(relative)
             seen.add(relative.casefold())
@@ -899,10 +904,11 @@ def _synchronize_offline_preloader(
     language: str,
     bundle_version: str,
     page_hrefs: tuple[str, ...],
+    active_offline_preloaders: tuple[str, ...] | None = None,
+    offline_preloader_recoveries: dict[str, str] | None = None,
 ) -> tuple[Path, ...]:
-    """Refresh embedded HTML/JSON so the offline layer cannot serve stale ADT settings."""
+    """Refresh every active offline preloader without changing its authored wrapper."""
 
-    preloader = book / OFFLINE_PRELOADER_RELATIVE
     changed: list[Path] = []
     active_pages = sorted(
         {Path(*PurePosixPath(href).parts) for href in page_hrefs},
@@ -924,54 +930,76 @@ def _synchronize_offline_preloader(
             html_path.write_bytes(document.encode(updated))
             changed.append(relative)
 
-    if not preloader.is_file():
-        return tuple(dict.fromkeys(changed))
-
-    preloader_document = TextDocument.read(preloader)
-    preloader_source = preloader_document.text
-    payload_start, payload_end = _inline_json_span(preloader_source)
-    try:
-        inline = json.loads(preloader_source[payload_start:payload_end])
-    except json.JSONDecodeError as exc:
-        raise PublishFailedError("Offline preloader INLINE resource map is invalid JSON.") from exc
-    if not isinstance(inline, dict):
-        raise PublishFailedError("Offline preloader INLINE resource map must contain an object.")
-
-    inline["./assets/config.json"] = _read_json(
-        book / "assets" / "config.json", "assets/config.json"
-    )
-    inline[f"./content/i18n/{language}/videos.json"] = _read_json(
-        book / "content" / "i18n" / language / "videos.json",
-        f"{language}/videos.json",
-    )
-    for key in tuple(inline):
-        if not isinstance(key, str):
-            continue
-        relative_text = key.removeprefix("./")
+    selected = active_offline_preloaders
+    if selected is None:
+        selected = (
+            (OFFLINE_PRELOADER_RELATIVE.as_posix(),)
+            if (book / OFFLINE_PRELOADER_RELATIVE).is_file()
+            else ()
+        )
+    recoveries = offline_preloader_recoveries or {}
+    documents: dict[str, tuple[TextDocument, str, int, int]] = {}
+    valid_payloads: dict[str, dict[str, object]] = {}
+    for relative_text in selected:
+        relative = _safe_archive_path(relative_text)
+        preloader = book / Path(*relative.parts)
+        if not preloader.is_file():
+            raise PublishFailedError(f"Active offline preloader is missing: '{relative_text}'.")
+        document = TextDocument.read(preloader)
+        source = document.text
+        payload_start, payload_end = _inline_json_span(source)
+        documents[relative_text] = (document, source, payload_start, payload_end)
         try:
-            relative = _safe_archive_path(relative_text)
-        except PublishFailedError:
+            payload = json.loads(source[payload_start:payload_end])
+        except json.JSONDecodeError:
             continue
-        source_path = book / Path(*relative.parts)
-        if not source_path.is_file():
-            continue
-        if source_path.suffix.lower() == ".html":
-            # Use the same byte-aware reader as final validation. Path.read_text()
-            # performs universal-newline translation and would silently turn CRLF
-            # into LF, making an otherwise current offline payload appear stale.
-            inline[key] = TextDocument.read(source_path).text
-        elif source_path.suffix.lower() == ".json":
-            inline[key] = _read_json(source_path, relative.as_posix())
+        if isinstance(payload, dict):
+            valid_payloads[relative_text] = payload
 
-    serialized = json.dumps(inline, ensure_ascii=True, separators=(",", ":"))
-    updated_preloader = (
-        preloader_source[:payload_start]
-        + serialized
-        + preloader_source[payload_end:]
-    )
-    if updated_preloader != preloader_source:
-        preloader.write_bytes(preloader_document.encode(updated_preloader))
-        changed.append(OFFLINE_PRELOADER_RELATIVE)
+    for relative_text in selected:
+        document, source, payload_start, payload_end = documents[relative_text]
+        inline = valid_payloads.get(relative_text)
+        if inline is None:
+            recovery_source = recoveries.get(relative_text)
+            recovery = valid_payloads.get(recovery_source or "")
+            if recovery is None:
+                raise PublishFailedError(
+                    f"Active offline preloader '{relative_text}' has invalid JSON and no valid recovery source."
+                )
+            inline = copy.deepcopy(recovery)
+        else:
+            inline = copy.deepcopy(inline)
+
+        inline["./assets/config.json"] = _read_json(
+            book / "assets" / "config.json", "assets/config.json"
+        )
+        inline[f"./content/i18n/{language}/videos.json"] = _read_json(
+            book / "content" / "i18n" / language / "videos.json",
+            f"{language}/videos.json",
+        )
+        for key in tuple(inline):
+            if not isinstance(key, str):
+                continue
+            relative_value = key.removeprefix("./")
+            try:
+                resource = _safe_archive_path(relative_value)
+            except PublishFailedError:
+                continue
+            source_path = book / Path(*resource.parts)
+            if not source_path.is_file():
+                continue
+            if source_path.suffix.lower() == ".html":
+                # TextDocument preserves BOM and newline semantics in embedded pages.
+                inline[key] = TextDocument.read(source_path).text
+            elif source_path.suffix.lower() == ".json":
+                inline[key] = _read_json(source_path, resource.as_posix())
+
+        serialized = json.dumps(inline, ensure_ascii=True, separators=(",", ":"))
+        updated = source[:payload_start] + serialized + source[payload_end:]
+        if updated != source:
+            preloader = book / Path(*_safe_archive_path(relative_text).parts)
+            preloader.write_bytes(document.encode(updated))
+            changed.append(Path(*_safe_archive_path(relative_text).parts))
     return tuple(dict.fromkeys(changed))
 
 
@@ -1172,6 +1200,7 @@ def _commit_in_place(
     zip_sentinels: dict[str, str],
     page_hrefs: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
+    active_offline_preloaders: tuple[str, ...],
     reporter: _PublishReporter,
 ) -> None:
     """Commit only allowlisted files and restore them from a durable journal on failure."""
@@ -1243,6 +1272,7 @@ def _commit_in_place(
             language=language,
             page_hrefs=page_hrefs,
             active_runtime_files=active_runtime_files,
+            active_offline_preloaders=active_offline_preloaders,
         )
         _verify_zip_sentinels(book, zip_sentinels)
         document["status"] = "committed"
@@ -1460,9 +1490,12 @@ def publish_adt(
     if in_place:
         stage_source_paths: set[Path] = {
             source_book / "assets" / "config.json",
-            source_book / "assets" / "offline-preloader.js",
             source_book / "imsmanifest.xml",
         }
+        stage_source_paths.update(
+            source_book / Path(*PurePosixPath(relative).parts)
+            for relative in publication_plan.active_offline_preloaders
+        )
         stage_source_paths.update(
             source_book / Path(*PurePosixPath(relative).parts)
             for relative in source_declared
@@ -1548,6 +1581,7 @@ def publish_adt(
                 source_declared,
                 publication_plan.page_hrefs,
                 publication_plan.offline_resource_files,
+                publication_plan.active_offline_preloaders,
                 selected_language,
                 publication_plan.active_runtime_files,
                 reporter,
@@ -1559,6 +1593,7 @@ def publish_adt(
                 skip_prefix=video_relative_root if mode == "replace" else None,
                 page_hrefs=publication_plan.page_hrefs,
                 offline_resource_files=publication_plan.offline_resource_files,
+                active_offline_preloaders=publication_plan.active_offline_preloaders,
                 active_runtime_files=publication_plan.active_runtime_files,
             )
         stage_video_root = stage / "content" / "i18n" / selected_language / "video"
@@ -1593,7 +1628,7 @@ def publish_adt(
                 progress_callback(
                     job_id,
                     "item_completed",
-                    {"source": str(item.source), "status": "published", "size_bytes": item.size_bytes},
+                    {"source": str(item.source), "status": "staged", "size_bytes": item.size_bytes},
                 )
             reporter.phase(
                 "staging",
@@ -1633,6 +1668,8 @@ def publish_adt(
             language=selected_language,
             bundle_version=bundle_version,
             page_hrefs=publication_plan.page_hrefs,
+            active_offline_preloaders=publication_plan.active_offline_preloaders,
+            offline_preloader_recoveries=publication_plan.offline_preloader_recoveries,
         )
         reporter.check_cancelled()
         reporter.phase("staged_validation", 80, "Validating staged publication files")
@@ -1644,6 +1681,7 @@ def publish_adt(
                 declared=source_declared,
                 page_hrefs=publication_plan.page_hrefs,
                 offline_resource_files=publication_plan.offline_resource_files,
+                active_offline_preloaders=publication_plan.active_offline_preloaders,
                 videos=items,
                 mode=mode,
             )
@@ -1674,6 +1712,7 @@ def publish_adt(
             language=selected_language,
             page_hrefs=publication_plan.page_hrefs,
             active_runtime_files=publication_plan.active_runtime_files,
+            active_offline_preloaders=publication_plan.active_offline_preloaders,
         )
         expected_video_count = len(mappings)
         if validation["video_count"] != expected_video_count:
@@ -1719,6 +1758,7 @@ def publish_adt(
                 publication_plan.zip_sentinels,
                 publication_plan.page_hrefs,
                 publication_plan.active_runtime_files,
+                publication_plan.active_offline_preloaders,
                 reporter,
             )
         else:

@@ -30,6 +30,9 @@ APPROVED_HELPERS: Final = {
     "sign_script": "assets/sign-language-video.js",
     "sign_style": "assets/sign-language-video.css",
 }
+OFFLINE_PRELOADER_NAME_PATTERN: Final = re.compile(
+    r"offline-preloader(?:[-._][A-Za-z0-9_-]+)*\.js$", re.IGNORECASE
+)
 
 
 def _sha256(path: Path) -> str:
@@ -274,36 +277,61 @@ def _git_state(book: Path) -> dict[str, object]:
     }
 
 
-def _inline_format(path: Path) -> str:
-    if not path.is_file():
-        return "absent"
-    try:
-        source = path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeError):
-        return "unreadable"
-    match = re.search(r"\b(?:var|let|const)\s+INLINE\s*=", source)
-    return "javascript-object" if match else "unsupported"
-
-
-def _offline_resource_files(path: Path) -> tuple[str, ...]:
-    """Return existing local HTML/JSON sources represented by the INLINE payload."""
-
-    if not path.is_file():
-        return ()
-    try:
-        source = path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeError):
-        return ()
+def _inline_object_span(source: str) -> tuple[int, int] | None:
     assignment = re.search(r"\b(?:var|let|const)\s+INLINE\s*=\s*", source)
     if assignment is None:
-        return ()
+        return None
+    start = assignment.end()
+    while start < len(source) and source[start].isspace():
+        start += 1
+    if start >= len(source) or source[start] != "{":
+        return None
+    depth = 0
+    quoted = False
+    escaped = False
+    for position in range(start, len(source)):
+        character = source[position]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+            continue
+        if character == '"':
+            quoted = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return start, position + 1
+    return None
+
+
+def _inspect_offline_preloader(path: Path) -> tuple[str, dict[str, object] | None]:
+    if not path.is_file():
+        return "missing", None
     try:
-        payload, _end = json.JSONDecoder().raw_decode(source, assignment.end())
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return ()
+        source = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return "unreadable", None
+    span = _inline_object_span(source)
+    if span is None:
+        return "unsupported", None
+    try:
+        payload = json.loads(source[span[0]:span[1]])
+    except json.JSONDecodeError:
+        return "invalid-json", None
     if not isinstance(payload, dict):
-        return ()
-    root = path.parent.parent
+        return "invalid-json", None
+    return "javascript-object", payload
+
+
+def _offline_resource_files(book: Path, payload: dict[str, object]) -> tuple[str, ...]:
+    """Return existing local HTML/JSON sources represented by an INLINE payload."""
+
     resources: set[str] = set()
     for key in payload:
         if not isinstance(key, str):
@@ -314,9 +342,35 @@ def _offline_resource_files(path: Path) -> tuple[str, ...]:
             continue
         if PurePosixPath(relative).suffix.casefold() not in {".html", ".json"}:
             continue
-        if (root / Path(*PurePosixPath(relative).parts)).is_file():
+        if (book / Path(*PurePosixPath(relative).parts)).is_file():
             resources.add(relative)
     return tuple(sorted(resources, key=str.casefold))
+
+
+def _active_offline_preloaders(
+    book: Path,
+    hrefs: Iterable[str],
+) -> dict[str, list[str]]:
+    locations: dict[str, list[str]] = {}
+    for href in hrefs:
+        page = book / Path(*PurePosixPath(href).parts)
+        try:
+            source = page.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            continue
+        for match in SCRIPT_SOURCE_PATTERN.finditer(source):
+            raw = match.group("src").split("?", 1)[0].split("#", 1)[0]
+            relative = posixpath.normpath(
+                raw.lstrip("/") if raw.startswith("/")
+                else posixpath.join(PurePosixPath(href).parent.as_posix(), raw)
+            )
+            relative = _safe_relative(relative)
+            if OFFLINE_PRELOADER_NAME_PATTERN.fullmatch(PurePosixPath(relative).name):
+                locations.setdefault(relative, []).append(href)
+    conventional = "assets/offline-preloader.js"
+    if not locations and (book / Path(*PurePosixPath(conventional).parts)).is_file():
+        locations[conventional] = []
+    return locations
 
 
 def _active_assets(book: Path, hrefs: Iterable[str]) -> tuple[tuple[str, ...], dict[str, list[str]]]:
@@ -362,6 +416,9 @@ class AdtPublishPlan:
     existing_mappings: dict[str, str]
     active_runtime_files: tuple[str, ...]
     helper_files: dict[str, dict[str, object]]
+    active_offline_preloaders: tuple[str, ...]
+    offline_preloader_formats: dict[str, str]
+    offline_preloader_recoveries: dict[str, str]
     offline_preloader_format: str
     offline_resource_files: tuple[str, ...]
     manifest_file_count: int
@@ -392,6 +449,9 @@ class AdtPublishPlan:
             "existing_mappings": dict(self.existing_mappings),
             "active_runtime_files": list(self.active_runtime_files),
             "helper_files": self.helper_files,
+            "active_offline_preloaders": list(self.active_offline_preloaders),
+            "offline_preloader_formats": dict(self.offline_preloader_formats),
+            "offline_preloader_recoveries": dict(self.offline_preloader_recoveries),
             "offline_preloader_format": self.offline_preloader_format,
             "offline_resource_files": list(self.offline_resource_files),
             "manifest_file_count": self.manifest_file_count,
@@ -449,19 +509,61 @@ def analyze_adt_publish(
     for relative in runtime:
         if not (root / Path(*PurePosixPath(relative).parts)).is_file():
             blockers.append(f"Active runtime is missing: '{relative}'.")
-    offline_format = _inline_format(root / "assets" / "offline-preloader.js")
-    offline_resources = _offline_resource_files(root / "assets" / "offline-preloader.js")
+    preloader_locations = _active_offline_preloaders(root, hrefs)
+    active_preloaders = tuple(sorted(preloader_locations, key=str.casefold))
+    preloader_formats: dict[str, str] = {}
+    preloader_payloads: dict[str, dict[str, object]] = {}
+    for relative in active_preloaders:
+        path = root / Path(*PurePosixPath(relative).parts)
+        preloader_format, payload = _inspect_offline_preloader(path)
+        preloader_formats[relative] = preloader_format
+        if payload is not None:
+            preloader_payloads[relative] = payload
+
+    valid_preloaders = sorted(
+        preloader_payloads,
+        key=lambda relative: (-len(preloader_locations[relative]), relative.casefold()),
+    )
+    preloader_recoveries: dict[str, str] = {}
+    unrecoverable_preloaders: list[str] = []
+    for relative in active_preloaders:
+        preloader_format = preloader_formats[relative]
+        if preloader_format == "javascript-object":
+            continue
+        if preloader_format == "invalid-json" and valid_preloaders:
+            preloader_recoveries[relative] = valid_preloaders[0]
+            continue
+        unrecoverable_preloaders.append(relative)
+        blockers.append(
+            f"Active offline preloader '{relative}' has {preloader_format} INLINE data "
+            "and cannot be updated safely."
+        )
+
+    offline_resources = tuple(sorted({
+        resource
+        for payload in preloader_payloads.values()
+        for resource in _offline_resource_files(root, payload)
+    }, key=str.casefold))
+    if not active_preloaders:
+        offline_format = "absent"
+    elif unrecoverable_preloaders:
+        offline_format = "unsupported"
+    elif preloader_recoveries:
+        offline_format = "recoverable"
+    elif all(value == "javascript-object" for value in preloader_formats.values()):
+        offline_format = "javascript-object"
+    else:
+        offline_format = "unsupported"
     manifest_keys = {relative.casefold() for relative in manifest}
     required_sources = {
         *hrefs,
         *runtime,
+        *active_preloaders,
         *offline_resources,
         "assets/config.json",
         "content/pages.json",
         f"content/i18n/{selected}/videos.json",
     }
-    if (root / "assets" / "offline-preloader.js").is_file():
-        required_sources.add("assets/offline-preloader.js")
     manifest_recoveries = tuple(
         relative
         for relative in sorted(required_sources, key=str.casefold)
@@ -473,8 +575,6 @@ def analyze_adt_publish(
         for relative in manifest
         if not (root / Path(*PurePosixPath(relative).parts)).is_file()
     )
-    if offline_format in {"unsupported", "unreadable"}:
-        blockers.append("The offline preloader INLINE map cannot be updated safely.")
     git = _git_state(root)
     if git.get("dirty"):
         warnings.append(
@@ -482,6 +582,17 @@ def analyze_adt_publish(
         )
     if len(runtime) > 1:
         warnings.append("Different pages reference more than one active runtime bundle.")
+    if len(active_preloaders) > 1:
+        warnings.append(
+            f"The active pages reference {len(active_preloaders)} offline preloaders; "
+            "High2Min will synchronize each one."
+        )
+    if preloader_recoveries:
+        for relative, recovery in preloader_recoveries.items():
+            warnings.append(
+                f"Active offline preloader '{relative}' has invalid JSON; High2Min will "
+                f"recover its resource map from '{recovery}' before publishing."
+            )
     if manifest_recoveries:
         warnings.append(
             f"The manifest omits {len(manifest_recoveries)} required active/offline resource(s); "
@@ -499,8 +610,7 @@ def analyze_adt_publish(
         f"content/i18n/{selected}/videos.json",
         "imsmanifest.xml",
     }
-    if offline_format != "absent":
-        mutations.add("assets/offline-preloader.js")
+    mutations.update(active_preloaders)
     for kind, relative in APPROVED_HELPERS.items():
         path = root / Path(*PurePosixPath(relative).parts)
         present = path.is_file()
@@ -515,7 +625,7 @@ def analyze_adt_publish(
     for href in hrefs:
         path = root / Path(*PurePosixPath(href).parts)
         source = path.read_text(encoding="utf-8-sig")
-        needs_query_update = "base.bundle" in source or "offline-preloader.js" in source
+        needs_query_update = "base.bundle" in source or "offline-preloader" in source
         needs_helpers = any(href not in helper_locations[value] for value in APPROVED_HELPERS.values())
         if needs_query_update or needs_helpers:
             mutations.add(href)
@@ -543,6 +653,9 @@ def analyze_adt_publish(
         existing_mappings=existing,
         active_runtime_files=runtime,
         helper_files=helper_files,
+        active_offline_preloaders=active_preloaders,
+        offline_preloader_formats=preloader_formats,
+        offline_preloader_recoveries=preloader_recoveries,
         offline_preloader_format=offline_format,
         offline_resource_files=offline_resources,
         manifest_file_count=len(manifest),

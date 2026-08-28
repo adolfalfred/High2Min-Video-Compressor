@@ -26,7 +26,7 @@ RUNTIME_REFERENCE_PATTERN: Final = re.compile(
     r'(?P<query>\?[^#"\'<>\s]*)?(?P<fragment>#[^"\'<>\s]*)?'
 )
 OFFLINE_REFERENCE_PATTERN: Final = re.compile(
-    r'(?P<path>(?:\.\./|\./)*assets/offline-preloader\.js)'
+    r'(?P<path>(?:\.\./|\./)*assets/offline-preloader(?:[-._][A-Za-z0-9_-]+)*\.js)'
     r'(?P<query>\?[^#"\'<>\s]*)?(?P<fragment>#[^"\'<>\s]*)?'
 )
 
@@ -212,15 +212,20 @@ def validate_staged_diff_contract(
         if generated_path.read_bytes() != source_document.encode(expected):
             raise PublishFailedError(f"Page '{href}' changed outside approved helper and cache references.")
 
-    source_preloader = source / "assets" / "offline-preloader.js"
-    generated_preloader = generated / "assets" / "offline-preloader.js"
-    if source_preloader.is_file() and generated_preloader.is_file():
+    for relative_text in plan.active_offline_preloaders:
+        relative = Path(*PurePosixPath(relative_text).parts)
+        source_preloader = source / relative
+        generated_preloader = generated / relative
+        if not source_preloader.is_file() or not generated_preloader.is_file():
+            raise PublishFailedError(f"Active offline preloader is missing: '{relative_text}'.")
         source_text = TextDocument.read(source_preloader).text
         generated_text = TextDocument.read(generated_preloader).text
         source_start, source_end = _inline_json_span(source_text)
         generated_start, generated_end = _inline_json_span(generated_text)
         if source_text[:source_start] != generated_text[:generated_start] or source_text[source_end:] != generated_text[generated_end:]:
-            raise PublishFailedError("Offline preloader changed outside its generated INLINE map.")
+            raise PublishFailedError(
+                f"Offline preloader '{relative_text}' changed outside its generated INLINE map."
+            )
 
     _validate_local_references(source, generated, plan.page_hrefs)
     validate_adapter_order(
@@ -239,6 +244,7 @@ def _validate_generated_site_overlay(
     language: str,
     page_hrefs: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
+    active_offline_preloaders: tuple[str, ...],
 ) -> None:
     """Validate a generated site, resolving unchanged files from an optional source overlay."""
 
@@ -253,20 +259,22 @@ def _validate_generated_site_overlay(
             _validate_javascript_structure(
                 _overlay_path(source_book, generated_book, relative)
             )
-    preloader = _overlay_path(
-        source_book,
-        generated_book,
-        "assets/offline-preloader.js",
-    )
-    if preloader.is_file():
+    for relative_text in active_offline_preloaders:
+        preloader = _overlay_path(source_book, generated_book, relative_text)
+        if not preloader.is_file():
+            raise PublishFailedError(f"Active offline preloader is missing: '{relative_text}'.")
         source = TextDocument.read(preloader).text
         start, end = _inline_json_span(source)
         try:
             inline = json.loads(source[start:end])
         except json.JSONDecodeError as exc:
-            raise PublishFailedError("Offline preloader INLINE map is invalid JSON.") from exc
+            raise PublishFailedError(
+                f"Offline preloader '{relative_text}' INLINE map is invalid JSON."
+            ) from exc
         if not isinstance(inline, dict):
-            raise PublishFailedError("Offline preloader INLINE map must contain an object.")
+            raise PublishFailedError(
+                f"Offline preloader '{relative_text}' INLINE map must contain an object."
+            )
         expected = {
             "./assets/config.json": _json_object(
                 _overlay_path(source_book, generated_book, "assets/config.json"),
@@ -283,14 +291,18 @@ def _validate_generated_site_overlay(
         }
         for key, value in expected.items():
             if inline.get(key) != value:
-                raise PublishFailedError(f"Offline preloader has stale embedded value for '{key}'.")
+                raise PublishFailedError(
+                    f"Offline preloader '{relative_text}' has stale embedded value for '{key}'."
+                )
         for key, value in inline.items():
             if not isinstance(key, str) or not key.endswith(".html") or not isinstance(value, str):
                 continue
             relative = key.removeprefix("./")
             path = _overlay_path(source_book, generated_book, relative)
             if path.is_file() and value != TextDocument.read(path).text:
-                raise PublishFailedError(f"Offline preloader has stale embedded HTML for '{key}'.")
+                raise PublishFailedError(
+                    f"Offline preloader '{relative_text}' has stale embedded HTML for '{key}'."
+                )
 
 
 def validate_staged_generated_site(
@@ -300,6 +312,7 @@ def validate_staged_generated_site(
     language: str,
     page_hrefs: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
+    active_offline_preloaders: tuple[str, ...],
 ) -> None:
     """Validate a minimal in-place staging overlay before repository files are replaced."""
 
@@ -309,6 +322,7 @@ def validate_staged_generated_site(
         language=language,
         page_hrefs=page_hrefs,
         active_runtime_files=active_runtime_files,
+        active_offline_preloaders=active_offline_preloaders,
     )
 
 
@@ -318,6 +332,7 @@ def validate_generated_site(
     language: str,
     page_hrefs: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
+    active_offline_preloaders: tuple[str, ...],
 ) -> None:
     """Validate local references, helper order, JS structure, and offline embedded data."""
 
@@ -327,4 +342,5 @@ def validate_generated_site(
         language=language,
         page_hrefs=page_hrefs,
         active_runtime_files=active_runtime_files,
+        active_offline_preloaders=active_offline_preloaders,
     )

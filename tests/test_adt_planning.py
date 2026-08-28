@@ -176,6 +176,91 @@ class AdtPlanningTests(unittest.TestCase):
             self.assertTrue(any("omits 1 required" in warning for warning in plan.warnings))
             self.assertTrue(any("1 stale declaration" in warning for warning in plan.warnings))
 
+    def test_analyzer_discovers_and_recovers_mixed_active_preloaders(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_profile(root)
+            fixed = book / "assets" / "offline-preloader-fixed.js"
+            fixed.write_text(
+                "var INLINE = "
+                + json.dumps(
+                    {
+                        "./assets/config.json": json.loads(
+                            (book / "assets" / "config.json").read_text(encoding="utf-8")
+                        ),
+                        "./content/i18n/sw-TZ/videos.json": {},
+                    },
+                    separators=(",", ":"),
+                )
+                + ";\nvar BASE_DIR = '';\n",
+                encoding="utf-8",
+            )
+            broken = book / "assets" / "offline-preloader.js"
+            broken.write_text(
+                'var INLINE = {"./assets/config.json":{}"broken":true};\n'
+                "var BASE_DIR = '';\n",
+                encoding="utf-8",
+            )
+            for href, preloader in (
+                ("index.html", "offline-preloader-fixed.js"),
+                ("pg002_joined.html", "offline-preloader-fixed.js"),
+                ("pg003.html", "offline-preloader.js"),
+            ):
+                page = book / href
+                page.write_text(
+                    page.read_text(encoding="utf-8")
+                    + f'<script src="./assets/{preloader}?v=4"></script>',
+                    encoding="utf-8",
+                )
+            videos = root / "videos"
+            videos.mkdir()
+            (videos / "page 1.mp4").write_bytes(b"replacement")
+            before = tree_hash(book)
+
+            plan = analyze_adt_publish(videos, book=book)
+
+            self.assertEqual(tree_hash(book), before)
+            self.assertTrue(plan.ready, plan.blockers)
+            self.assertEqual(
+                plan.active_offline_preloaders,
+                ("assets/offline-preloader-fixed.js", "assets/offline-preloader.js"),
+            )
+            self.assertEqual(plan.offline_preloader_format, "recoverable")
+            self.assertEqual(
+                plan.offline_preloader_formats["assets/offline-preloader.js"],
+                "invalid-json",
+            )
+            self.assertEqual(
+                plan.offline_preloader_recoveries,
+                {"assets/offline-preloader.js": "assets/offline-preloader-fixed.js"},
+            )
+            self.assertIn("assets/offline-preloader-fixed.js", plan.mutations)
+            self.assertIn("assets/offline-preloader.js", plan.mutations)
+            self.assertTrue(any("invalid JSON" in warning for warning in plan.warnings))
+
+    def test_analyzer_blocks_unrecoverable_active_preloader(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_profile(root)
+            index = book / "index.html"
+            index.write_text(
+                index.read_text(encoding="utf-8")
+                + '<script src="./assets/offline-preloader.js"></script>',
+                encoding="utf-8",
+            )
+            (book / "assets" / "offline-preloader.js").write_text(
+                'var INLINE = {"./assets/config.json":{}"broken":true};',
+                encoding="utf-8",
+            )
+            videos = root / "videos"
+            videos.mkdir()
+            (videos / "page 1.mp4").write_bytes(b"replacement")
+
+            plan = analyze_adt_publish(videos, book=book)
+
+            self.assertFalse(plan.ready)
+            self.assertTrue(any("invalid-json" in blocker for blocker in plan.blockers))
+
 
 if __name__ == "__main__":
     unittest.main()
