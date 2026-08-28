@@ -569,7 +569,9 @@ def _publish_plan(
     document["exit_code"] = int(ExitCode.SUCCESS if plan.ready else ExitCode.PUBLISH_FAILED)
     human = (
         f"ADT preview: {len(plan.videos)} video(s), {len(plan.mutations)} file change(s), "
-        f"{len(plan.removals)} removal(s), {len(plan.blockers)} blocker(s).\n"
+        f"{len(plan.removals)} removal(s), {len(plan.manifest_recoveries)} manifest recovery item(s), "
+        f"{len(plan.manifest_prunings)} stale manifest item(s), "
+        f"{len(plan.blockers)} blocker(s).\n"
     )
     return int(document["exit_code"]), document, human
 

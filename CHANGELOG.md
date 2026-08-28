@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.2 - 2026-08-28
+
+- Recover active pages and offline reader resources omitted from legacy ADT manifests.
+- Remove only stale manifest declarations whose source files no longer exist, while retaining local-reference validation.
+- Support page spine hrefs containing query parameters or fragments throughout planning and validation.
+- Preserve inactive HTML variants byte-for-byte instead of applying active-page cache updates to them.
+- Hide Git repository-analysis subprocesses on Windows so Analyze ADT changes and Update ADT website do not flash terminal windows.
+- Report manifest recoveries and stale declarations in the read-only CLI and desktop preview.
+
 ## 0.11.1 - 2026-08-28
 
 - Preserve CRLF, LF, and UTF-8 BOM semantics when refreshing HTML embedded in an ADT offline preloader.

@@ -66,6 +66,30 @@ def write_manifest(root: Path) -> None:
     tree.write(root / "imsmanifest.xml", encoding="utf-8", xml_declaration=True)
 
 
+def omit_manifest_files(root: Path, omitted: set[str]) -> None:
+    manifest = root / "imsmanifest.xml"
+    tree = ET.parse(manifest)
+    manifest_root = tree.getroot()
+    for element in list(manifest_root.iter(f"{{{IMS_NAMESPACE}}}file")):
+        if element.get("href") not in omitted:
+            continue
+        parent = next(
+            candidate for candidate in manifest_root.iter() if element in list(candidate)
+        )
+        parent.remove(element)
+    tree.write(manifest, encoding="utf-8", xml_declaration=True)
+
+
+def add_manifest_files(root: Path, additions: set[str]) -> None:
+    manifest = root / "imsmanifest.xml"
+    tree = ET.parse(manifest)
+    manifest_root = tree.getroot()
+    resource = next(manifest_root.iter(f"{{{IMS_NAMESPACE}}}resource"))
+    for relative in sorted(additions):
+        ET.SubElement(resource, f"{{{IMS_NAMESPACE}}}file", {"href": relative})
+    tree.write(manifest, encoding="utf-8", xml_declaration=True)
+
+
 def make_book(root: Path, *, bundle_version: object = "7", existing_video: bool = False) -> Path:
     book = root / "book"
     (book / "assets").mkdir(parents=True)
@@ -250,10 +274,15 @@ class PublishingTests(unittest.TestCase):
             book = make_book(root)
             inactive = book / "assets" / "base.bundle.min.js"
             inactive.write_bytes(b"unknown inactive runtime")
+            inactive_page = book / "inactive-section.html"
+            inactive_page.write_bytes(
+                b'<script src="./assets/base.bundle.local.js?v=7"></script>inactive'
+            )
             archive = book / "legacy-scrum.zip"
             archive.write_bytes(b"never touch this package")
             write_manifest(book)
             before_runtime = inactive.read_bytes()
+            before_page = inactive_page.read_bytes()
             before_zip = archive.read_bytes()
             videos = root / "compressed"
             videos.mkdir()
@@ -262,6 +291,7 @@ class PublishingTests(unittest.TestCase):
             publish_adt(videos, book=book, in_place=True, validate_media=False)
 
             self.assertEqual(inactive.read_bytes(), before_runtime)
+            self.assertEqual(inactive_page.read_bytes(), before_page)
             self.assertEqual(archive.read_bytes(), before_zip)
 
     def test_staged_video_copy_does_not_force_per_file_disk_sync(self) -> None:
@@ -517,6 +547,100 @@ class PublishingTests(unittest.TestCase):
 
             self.assertTrue((book / "assets" / "base.bundle.local.js").is_file())
             self.assertTrue(omitted.issubset(declared_manifest_files(manifest_path)))
+
+    def test_in_place_publish_recovers_active_pages_omitted_from_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            navigation = book / "content" / "navigation" / "nav.html"
+            navigation.parent.mkdir(parents=True)
+            navigation.write_text("<nav>Mathematics navigation</nav>", encoding="utf-8")
+            preloader = book / "assets" / "offline-preloader.js"
+            preloader.write_text(
+                "var INLINE = "
+                + json.dumps(
+                    {
+                        "./assets/config.json": json.loads(
+                            (book / "assets" / "config.json").read_text(encoding="utf-8")
+                        ),
+                        "./content/i18n/en-GB/videos.json": {},
+                        "./content/navigation/nav.html": "stale navigation",
+                    },
+                    separators=(",", ":"),
+                )
+                + ";\n  var BASE_DIR = \"\";\n",
+                encoding="utf-8",
+            )
+            write_manifest(book)
+            omitted = {
+                "pg002.html",
+                "pg003.html",
+                "content/navigation/nav.html",
+            }
+            pages_path = book / "content" / "pages.json"
+            pages = json.loads(pages_path.read_text(encoding="utf-8"))
+            pages[1]["href"] = "pg002.html?reader=32#page"
+            pages_path.write_text(json.dumps(pages), encoding="utf-8")
+            omit_manifest_files(book, omitted)
+            add_manifest_files(book, {"removed-legacy-page.html"})
+            self.assertTrue(
+                omitted.isdisjoint(declared_manifest_files(book / "imsmanifest.xml"))
+            )
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            self.assertTrue(
+                omitted.issubset(declared_manifest_files(book / "imsmanifest.xml"))
+            )
+            self.assertNotIn(
+                "removed-legacy-page.html",
+                declared_manifest_files(book / "imsmanifest.xml"),
+            )
+            for relative in {"pg002.html", "pg003.html"}:
+                source = (book / relative).read_text(encoding="utf-8")
+                self.assertIn("media-playback-independence.js", source)
+                self.assertIn("sign-language-video.js", source)
+            self.assertEqual(
+                read_offline_inline(preloader)["./content/navigation/nav.html"],
+                navigation.read_text(encoding="utf-8"),
+            )
+
+    def test_copy_publish_recovers_active_pages_without_changing_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            omit_manifest_files(book, {"pg002.html"})
+            add_manifest_files(book, {"removed-legacy-page.html"})
+            source_before = hash_tree(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            output = root / "published"
+
+            publish_adt(
+                videos,
+                book=book,
+                output=output,
+                validate_media=False,
+            )
+
+            self.assertEqual(hash_tree(book), source_before)
+            self.assertTrue((output / "pg002.html").is_file())
+            self.assertIn(
+                "pg002.html",
+                declared_manifest_files(output / "imsmanifest.xml"),
+            )
+            self.assertNotIn(
+                "removed-legacy-page.html",
+                declared_manifest_files(output / "imsmanifest.xml"),
+            )
+            self.assertEqual(
+                validate_adt_website(output)["page_count"],
+                3,
+            )
 
     def test_publish_refreshes_offline_preloader_settings_mappings_and_cache_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

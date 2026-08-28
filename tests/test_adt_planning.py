@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
+from adt_video_publisher import adt_planning
 from adt_video_publisher.adt_planning import analyze_adt_publish, plan_videos
 from adt_video_publisher.errors import InvalidInputError
 
@@ -63,6 +66,25 @@ def make_profile(root: Path) -> Path:
 
 
 class AdtPlanningTests(unittest.TestCase):
+    def test_git_analysis_hides_every_windows_child_process(self) -> None:
+        completed = (
+            subprocess.CompletedProcess(["git"], 0, stdout="C:/book\n", stderr=""),
+            subprocess.CompletedProcess(["git"], 0, stdout=" M notes.txt\n", stderr=""),
+        )
+        with patch(
+            "adt_video_publisher.adt_planning.hidden_process_options",
+            return_value={"creationflags": 0x08000000},
+        ), patch(
+            "adt_video_publisher.adt_planning.subprocess.run",
+            side_effect=completed,
+        ) as run:
+            state = adt_planning._git_state(Path("C:/book"))
+
+        self.assertTrue(state["dirty"])
+        self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["creationflags"], 0x08000000)
+
     def test_filename_mapping_uses_one_number_group_and_normalizes_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -117,6 +139,42 @@ class AdtPlanningTests(unittest.TestCase):
             self.assertIn("content/i18n/sw-TZ/video/page_3.mp4", plan.removals)
             self.assertIn("assets/media-playback-independence.js", plan.mutations)
             self.assertIn("index.html", plan.mutations)
+
+    def test_analyzer_reports_recoverable_active_pages_omitted_from_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_profile(root)
+            manifest = book / "imsmanifest.xml"
+            tree = ET.parse(manifest)
+            manifest_root = tree.getroot()
+            for element in list(manifest_root.iter(f"{{{IMS}}}file")):
+                if element.get("href") == "pg002_joined.html":
+                    parent = next(
+                        candidate
+                        for candidate in manifest_root.iter()
+                        if element in list(candidate)
+                    )
+                    parent.remove(element)
+            resource = next(manifest_root.iter(f"{{{IMS}}}resource"))
+            ET.SubElement(
+                resource,
+                f"{{{IMS}}}file",
+                {"href": "removed-legacy-page.html"},
+            )
+            tree.write(manifest, encoding="utf-8", xml_declaration=True)
+            videos = root / "videos"
+            videos.mkdir()
+            (videos / "page 1.mp4").write_bytes(b"replacement")
+            before = tree_hash(book)
+
+            plan = analyze_adt_publish(videos, book=book)
+
+            self.assertEqual(tree_hash(book), before)
+            self.assertTrue(plan.ready)
+            self.assertEqual(plan.manifest_recoveries, ("pg002_joined.html",))
+            self.assertEqual(plan.manifest_prunings, ("removed-legacy-page.html",))
+            self.assertTrue(any("omits 1 required" in warning for warning in plan.warnings))
+            self.assertTrue(any("1 stale declaration" in warning for warning in plan.warnings))
 
 
 if __name__ == "__main__":

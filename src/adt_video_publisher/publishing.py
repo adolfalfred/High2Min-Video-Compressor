@@ -322,7 +322,8 @@ def _page_count(book: Path) -> int:
     for position, page in enumerate(pages, start=1):
         if not isinstance(page, dict) or not isinstance(page.get("href"), str):
             raise PublishFailedError(f"Page entry {position} has no valid href.")
-        href = _safe_archive_path(page["href"]).as_posix()
+        href_value = page["href"].split("?", 1)[0].split("#", 1)[0]
+        href = _safe_archive_path(href_value).as_posix()
         if not (book / Path(*PurePosixPath(href).parts)).is_file():
             raise PublishFailedError(f"Page entry {position} points to a missing file: '{href}'.")
     return len(pages)
@@ -546,6 +547,8 @@ def _copy_in_place_stage_sources(
     source: Path,
     stage: Path,
     declared: tuple[str, ...],
+    page_hrefs: tuple[str, ...],
+    offline_resource_files: tuple[str, ...],
     language: str,
     active_runtime_files: tuple[str, ...],
     reporter: _PublishReporter,
@@ -562,6 +565,10 @@ def _copy_in_place_stage_sources(
         relative = Path(*PurePosixPath(relative_text).parts)
         if relative.suffix.lower() == ".html":
             required.add(relative)
+    for href in page_hrefs:
+        required.add(Path(*PurePosixPath(href).parts))
+    for relative_text in offline_resource_files:
+        required.add(Path(*PurePosixPath(relative_text).parts))
     for relative_text in active_runtime_files:
         required.add(Path(*PurePosixPath(relative_text).parts))
     for relative_text in APPROVED_HELPERS.values():
@@ -655,11 +662,19 @@ def _update_in_place_manifest(
     *,
     language: str,
     declared: tuple[str, ...],
+    page_hrefs: tuple[str, ...],
+    offline_resource_files: tuple[str, ...],
     videos: tuple[PageVideo, ...],
     mode: str,
 ) -> tuple[str, ...]:
     prefix = f"content/i18n/{language}/video/".casefold()
-    files = set(declared)
+    files = {
+        relative
+        for relative in declared
+        if _overlay_file(source, stage, relative).is_file()
+    }
+    files.update(page_hrefs)
+    files.update(offline_resource_files)
     if mode == "replace":
         files = {relative for relative in files if not relative.casefold().startswith(prefix)}
     files.update(f"content/i18n/{language}/video/{item.filename}" for item in videos)
@@ -764,16 +779,24 @@ def _copy_manifest_site(
     stage: Path,
     *,
     skip_prefix: str | None,
+    page_hrefs: tuple[str, ...],
+    offline_resource_files: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
 ) -> None:
     declared = declared_manifest_files(source / "imsmanifest.xml")
+    required = list(declared)
+    seen = {relative.casefold() for relative in required}
+    for relative in (*page_hrefs, *offline_resource_files):
+        if relative.casefold() not in seen:
+            required.append(relative)
+            seen.add(relative.casefold())
     prefix = skip_prefix.casefold().rstrip("/") + "/" if skip_prefix else None
-    for relative in declared:
+    for relative in required:
         if prefix and relative.casefold().startswith(prefix):
             continue
         source_file = source / Path(*PurePosixPath(relative).parts)
         if not source_file.is_file():
-            raise PublishFailedError(f"Manifest declares a missing source file: '{relative}'.")
+            continue
         destination = stage / Path(*PurePosixPath(relative).parts)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_file, destination)
@@ -875,12 +898,18 @@ def _synchronize_offline_preloader(
     *,
     language: str,
     bundle_version: str,
+    page_hrefs: tuple[str, ...],
 ) -> tuple[Path, ...]:
     """Refresh embedded HTML/JSON so the offline layer cannot serve stale ADT settings."""
 
     preloader = book / OFFLINE_PRELOADER_RELATIVE
     changed: list[Path] = []
-    for html_path in sorted(book.rglob("*.html"), key=lambda path: str(path).casefold()):
+    active_pages = sorted(
+        {Path(*PurePosixPath(href).parts) for href in page_hrefs},
+        key=lambda path: path.as_posix().casefold(),
+    )
+    for relative in active_pages:
+        html_path = book / relative
         document = TextDocument.read(html_path)
         source = document.text
         updated = OFFLINE_SCRIPT_PATTERN.sub(
@@ -893,7 +922,7 @@ def _synchronize_offline_preloader(
         )
         if updated != source:
             html_path.write_bytes(document.encode(updated))
-            changed.append(html_path.relative_to(book))
+            changed.append(relative)
 
     if not preloader.is_file():
         return tuple(dict.fromkeys(changed))
@@ -1441,15 +1470,25 @@ def publish_adt(
         )
         stage_source_paths.update(
             source_book / Path(*PurePosixPath(relative).parts)
+            for relative in publication_plan.page_hrefs
+        )
+        stage_source_paths.update(
+            source_book / Path(*PurePosixPath(relative).parts)
+            for relative in publication_plan.offline_resource_files
+        )
+        stage_source_paths.update(
+            source_book / Path(*PurePosixPath(relative).parts)
             for relative in publication_plan.active_runtime_files
         )
         staged_source_bytes = sum(path.stat().st_size for path in stage_source_paths if path.is_file())
         estimated_stage_bytes = total_video_bytes + staged_source_bytes
         required_bytes = estimated_stage_bytes + max(64 * 1024 * 1024, estimated_stage_bytes // 10)
     else:
+        source_relatives = set(source_declared)
+        source_relatives.update(publication_plan.manifest_recoveries)
         source_bytes = sum(
             (source_book / Path(*PurePosixPath(relative).parts)).stat().st_size
-            for relative in source_declared
+            for relative in source_relatives
             if (source_book / Path(*PurePosixPath(relative).parts)).is_file()
         )
         required_bytes = source_bytes + total_video_bytes + 32 * 1024 * 1024
@@ -1469,6 +1508,8 @@ def publish_adt(
             "required_bytes": required_bytes,
             "available_bytes": available,
             "declared_files": len(source_declared),
+            "manifest_recoveries": len(publication_plan.manifest_recoveries),
+            "manifest_prunings": len(publication_plan.manifest_prunings),
         },
     )
 
@@ -1505,6 +1546,8 @@ def publish_adt(
                 source_book,
                 stage,
                 source_declared,
+                publication_plan.page_hrefs,
+                publication_plan.offline_resource_files,
                 selected_language,
                 publication_plan.active_runtime_files,
                 reporter,
@@ -1514,6 +1557,8 @@ def publish_adt(
                 source_book,
                 stage,
                 skip_prefix=video_relative_root if mode == "replace" else None,
+                page_hrefs=publication_plan.page_hrefs,
+                offline_resource_files=publication_plan.offline_resource_files,
                 active_runtime_files=publication_plan.active_runtime_files,
             )
         stage_video_root = stage / "content" / "i18n" / selected_language / "video"
@@ -1587,6 +1632,7 @@ def publish_adt(
             stage,
             language=selected_language,
             bundle_version=bundle_version,
+            page_hrefs=publication_plan.page_hrefs,
         )
         reporter.check_cancelled()
         reporter.phase("staged_validation", 80, "Validating staged publication files")
@@ -1596,6 +1642,8 @@ def publish_adt(
                 stage,
                 language=selected_language,
                 declared=source_declared,
+                page_hrefs=publication_plan.page_hrefs,
+                offline_resource_files=publication_plan.offline_resource_files,
                 videos=items,
                 mode=mode,
             )

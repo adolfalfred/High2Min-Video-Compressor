@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Final
 
 from .errors import InvalidInputError, PublishFailedError
+from .processes import hidden_process_options
 
 IMS_NAMESPACE: Final = "http://www.imsproject.org/xsd/imscp_rootv1p1p2"
 NUMBER_GROUP_PATTERN: Final = re.compile(r"[0-9]+")
@@ -250,6 +251,7 @@ def _git_state(book: Path) -> dict[str, object]:
             text=True,
             timeout=5,
             check=False,
+            **hidden_process_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return {"repository": False, "dirty": False, "root": None, "changed_count": 0}
@@ -261,6 +263,7 @@ def _git_state(book: Path) -> dict[str, object]:
         text=True,
         timeout=10,
         check=False,
+        **hidden_process_options(),
     )
     lines = tuple(line for line in status.stdout.splitlines() if line.strip())
     return {
@@ -280,6 +283,40 @@ def _inline_format(path: Path) -> str:
         return "unreadable"
     match = re.search(r"\b(?:var|let|const)\s+INLINE\s*=", source)
     return "javascript-object" if match else "unsupported"
+
+
+def _offline_resource_files(path: Path) -> tuple[str, ...]:
+    """Return existing local HTML/JSON sources represented by the INLINE payload."""
+
+    if not path.is_file():
+        return ()
+    try:
+        source = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return ()
+    assignment = re.search(r"\b(?:var|let|const)\s+INLINE\s*=\s*", source)
+    if assignment is None:
+        return ()
+    try:
+        payload, _end = json.JSONDecoder().raw_decode(source, assignment.end())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ()
+    if not isinstance(payload, dict):
+        return ()
+    root = path.parent.parent
+    resources: set[str] = set()
+    for key in payload:
+        if not isinstance(key, str):
+            continue
+        try:
+            relative = _safe_relative(key.removeprefix("./"))
+        except PublishFailedError:
+            continue
+        if PurePosixPath(relative).suffix.casefold() not in {".html", ".json"}:
+            continue
+        if (root / Path(*PurePosixPath(relative).parts)).is_file():
+            resources.add(relative)
+    return tuple(sorted(resources, key=str.casefold))
 
 
 def _active_assets(book: Path, hrefs: Iterable[str]) -> tuple[tuple[str, ...], dict[str, list[str]]]:
@@ -326,7 +363,10 @@ class AdtPublishPlan:
     active_runtime_files: tuple[str, ...]
     helper_files: dict[str, dict[str, object]]
     offline_preloader_format: str
+    offline_resource_files: tuple[str, ...]
     manifest_file_count: int
+    manifest_recoveries: tuple[str, ...]
+    manifest_prunings: tuple[str, ...]
     git: dict[str, object]
     mutations: tuple[str, ...]
     removals: tuple[str, ...]
@@ -353,7 +393,10 @@ class AdtPublishPlan:
             "active_runtime_files": list(self.active_runtime_files),
             "helper_files": self.helper_files,
             "offline_preloader_format": self.offline_preloader_format,
+            "offline_resource_files": list(self.offline_resource_files),
             "manifest_file_count": self.manifest_file_count,
+            "manifest_recoveries": list(self.manifest_recoveries),
+            "manifest_prunings": list(self.manifest_prunings),
             "git": self.git,
             "mutations": list(self.mutations),
             "removals": list(self.removals),
@@ -407,6 +450,29 @@ def analyze_adt_publish(
         if not (root / Path(*PurePosixPath(relative).parts)).is_file():
             blockers.append(f"Active runtime is missing: '{relative}'.")
     offline_format = _inline_format(root / "assets" / "offline-preloader.js")
+    offline_resources = _offline_resource_files(root / "assets" / "offline-preloader.js")
+    manifest_keys = {relative.casefold() for relative in manifest}
+    required_sources = {
+        *hrefs,
+        *runtime,
+        *offline_resources,
+        "assets/config.json",
+        "content/pages.json",
+        f"content/i18n/{selected}/videos.json",
+    }
+    if (root / "assets" / "offline-preloader.js").is_file():
+        required_sources.add("assets/offline-preloader.js")
+    manifest_recoveries = tuple(
+        relative
+        for relative in sorted(required_sources, key=str.casefold)
+        if relative.casefold() not in manifest_keys
+        and (root / Path(*PurePosixPath(relative).parts)).is_file()
+    )
+    manifest_prunings = tuple(
+        relative
+        for relative in manifest
+        if not (root / Path(*PurePosixPath(relative).parts)).is_file()
+    )
     if offline_format in {"unsupported", "unreadable"}:
         blockers.append("The offline preloader INLINE map cannot be updated safely.")
     git = _git_state(root)
@@ -416,6 +482,16 @@ def analyze_adt_publish(
         )
     if len(runtime) > 1:
         warnings.append("Different pages reference more than one active runtime bundle.")
+    if manifest_recoveries:
+        warnings.append(
+            f"The manifest omits {len(manifest_recoveries)} required active/offline resource(s); "
+            "High2Min will recover their declarations during publishing."
+        )
+    if manifest_prunings:
+        warnings.append(
+            f"The manifest contains {len(manifest_prunings)} stale declaration(s) for missing files; "
+            "High2Min will remove those declarations during publishing."
+        )
 
     helper_files: dict[str, dict[str, object]] = {}
     mutations: set[str] = {
@@ -468,7 +544,10 @@ def analyze_adt_publish(
         active_runtime_files=runtime,
         helper_files=helper_files,
         offline_preloader_format=offline_format,
+        offline_resource_files=offline_resources,
         manifest_file_count=len(manifest),
+        manifest_recoveries=manifest_recoveries,
+        manifest_prunings=manifest_prunings,
         git=git,
         mutations=tuple(sorted(mutations, key=str.casefold)),
         removals=tuple(sorted(set(removals), key=str.casefold)),

@@ -888,7 +888,10 @@ def create_application(
             elif isinstance(value, AdtPublishPlan):
                 self.status_var.set(
                     f"ADT preview: {len(value.videos)} video(s), {len(value.mutations)} file change(s), "
-                    f"{len(value.removals)} removal(s), {len(value.blockers)} blocker(s). No files changed."
+                    f"{len(value.removals)} removal(s), "
+                    f"{len(value.manifest_recoveries)} manifest recovery item(s), "
+                    f"{len(value.manifest_prunings)} stale manifest item(s), "
+                    f"{len(value.blockers)} blocker(s). No files changed."
                 )
                 self._append_log(self.status_var.get())
                 for item in value.videos:
