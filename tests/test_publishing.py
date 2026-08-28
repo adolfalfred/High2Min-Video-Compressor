@@ -578,6 +578,96 @@ class PublishingTests(unittest.TestCase):
             )
             self.assertEqual(inline["./index.html"], updated_index)
 
+    def test_publish_preserves_crlf_and_bom_in_offline_embedded_html(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            navigation = book / "content" / "navigation" / "nav.html"
+            navigation.parent.mkdir(parents=True)
+            navigation_source = "<!doctype html>\r\n<nav>\r\n  Utamaduni\r\n</nav>\r\n"
+            navigation.write_bytes(b"\xef\xbb\xbf" + navigation_source.encode("utf-8"))
+            preloader = book / "assets" / "offline-preloader.js"
+            preloader.write_text(
+                "var INLINE = "
+                + json.dumps(
+                    {
+                        "./assets/config.json": json.loads(
+                            (book / "assets" / "config.json").read_text(encoding="utf-8")
+                        ),
+                        "./content/i18n/en-GB/videos.json": {},
+                        "./content/navigation/nav.html": "stale",
+                    },
+                    separators=(",", ":"),
+                )
+                + ";\n  var BASE_DIR = \"\";\n",
+                encoding="utf-8",
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            inline = read_offline_inline(preloader)
+            self.assertEqual(
+                inline["./content/navigation/nav.html"],
+                navigation_source,
+            )
+            self.assertTrue(navigation.read_bytes().startswith(b"\xef\xbb\xbf"))
+            self.assertIn(b"\r\n", navigation.read_bytes())
+
+    def test_offline_mismatch_is_rejected_before_repository_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            index = book / "index.html"
+            preloader = book / "assets" / "offline-preloader.js"
+            preloader.write_text(
+                "var INLINE = "
+                + json.dumps(
+                    {
+                        "./assets/config.json": json.loads(
+                            (book / "assets" / "config.json").read_text(encoding="utf-8")
+                        ),
+                        "./content/i18n/en-GB/videos.json": {},
+                        "./index.html": index.read_text(encoding="utf-8"),
+                    },
+                    separators=(",", ":"),
+                )
+                + ";\n  var BASE_DIR = \"\";\n",
+                encoding="utf-8",
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            before = hash_tree(book)
+            actual_sync = publishing._synchronize_offline_preloader
+
+            def corrupt_staged_inline(*args: object, **kwargs: object) -> tuple[Path, ...]:
+                changed = actual_sync(*args, **kwargs)  # type: ignore[arg-type]
+                staged_book = args[0]
+                staged_preloader = staged_book / "assets" / "offline-preloader.js"  # type: ignore[operator]
+                source = staged_preloader.read_text(encoding="utf-8")
+                staged_preloader.write_text(
+                    source.replace("<title>Test</title>", "<title>Stale</title>"),
+                    encoding="utf-8",
+                )
+                return changed
+
+            with patch(
+                "adt_video_publisher.publishing._synchronize_offline_preloader",
+                side_effect=corrupt_staged_inline,
+            ), patch(
+                "adt_video_publisher.publishing._commit_in_place"
+            ) as commit, self.assertRaisesRegex(PublishFailedError, "stale embedded HTML"):
+                publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            commit.assert_not_called()
+            self.assertEqual(hash_tree(book), before)
+            self.assertEqual(list(root.glob(".*.adt-publish-*")), [])
+
     def test_publish_stops_safely_when_offline_preloader_is_malformed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

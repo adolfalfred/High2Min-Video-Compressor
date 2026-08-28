@@ -232,25 +232,32 @@ def validate_staged_diff_contract(
         _validate_javascript_structure(generated / relative) if relative.endswith(".js") else None
 
 
-def validate_generated_site(
-    book: Path,
+def _validate_generated_site_overlay(
+    source_book: Path,
+    generated_book: Path,
     *,
     language: str,
     page_hrefs: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
 ) -> None:
-    """Validate local references, helper order, JS structure, and offline embedded data."""
+    """Validate a generated site, resolving unchanged files from an optional source overlay."""
 
-    _validate_local_references(book, book, page_hrefs)
+    _validate_local_references(source_book, generated_book, page_hrefs)
     validate_adapter_order(
-        book,
+        generated_book,
         page_hrefs=page_hrefs,
         active_runtime_files=active_runtime_files,
     )
     for relative in APPROVED_HELPERS.values():
         if relative.endswith(".js"):
-            _validate_javascript_structure(book / relative)
-    preloader = book / "assets" / "offline-preloader.js"
+            _validate_javascript_structure(
+                _overlay_path(source_book, generated_book, relative)
+            )
+    preloader = _overlay_path(
+        source_book,
+        generated_book,
+        "assets/offline-preloader.js",
+    )
     if preloader.is_file():
         source = TextDocument.read(preloader).text
         start, end = _inline_json_span(source)
@@ -261,9 +268,17 @@ def validate_generated_site(
         if not isinstance(inline, dict):
             raise PublishFailedError("Offline preloader INLINE map must contain an object.")
         expected = {
-            "./assets/config.json": _json_object(book / "assets" / "config.json", "Config"),
+            "./assets/config.json": _json_object(
+                _overlay_path(source_book, generated_book, "assets/config.json"),
+                "Config",
+            ),
             f"./content/i18n/{language}/videos.json": _json_object(
-                book / "content" / "i18n" / language / "videos.json", "Video mappings"
+                _overlay_path(
+                    source_book,
+                    generated_book,
+                    f"content/i18n/{language}/videos.json",
+                ),
+                "Video mappings",
             ),
         }
         for key, value in expected.items():
@@ -273,6 +288,43 @@ def validate_generated_site(
             if not isinstance(key, str) or not key.endswith(".html") or not isinstance(value, str):
                 continue
             relative = key.removeprefix("./")
-            path = book / Path(*PurePosixPath(relative).parts)
+            path = _overlay_path(source_book, generated_book, relative)
             if path.is_file() and value != TextDocument.read(path).text:
                 raise PublishFailedError(f"Offline preloader has stale embedded HTML for '{key}'.")
+
+
+def validate_staged_generated_site(
+    source_book: Path,
+    generated_book: Path,
+    *,
+    language: str,
+    page_hrefs: tuple[str, ...],
+    active_runtime_files: tuple[str, ...],
+) -> None:
+    """Validate a minimal in-place staging overlay before repository files are replaced."""
+
+    _validate_generated_site_overlay(
+        source_book,
+        generated_book,
+        language=language,
+        page_hrefs=page_hrefs,
+        active_runtime_files=active_runtime_files,
+    )
+
+
+def validate_generated_site(
+    book: Path,
+    *,
+    language: str,
+    page_hrefs: tuple[str, ...],
+    active_runtime_files: tuple[str, ...],
+) -> None:
+    """Validate local references, helper order, JS structure, and offline embedded data."""
+
+    _validate_generated_site_overlay(
+        book,
+        book,
+        language=language,
+        page_hrefs=page_hrefs,
+        active_runtime_files=active_runtime_files,
+    )

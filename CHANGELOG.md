@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.1 - 2026-08-28
+
+- Preserve CRLF, LF, and UTF-8 BOM semantics when refreshing HTML embedded in an ADT offline preloader.
+- Validate offline-preloader HTML, configuration, and video mappings in the staged overlay before replacing repository files.
+- Add regression coverage for the Utamaduni Standard 1 navigation format and pre-commit rejection of stale embedded HTML.
+
 ## 0.11.0 - 2026-08-27
 
 - Add a read-only ADT compatibility and exact-change preview to the CLI and desktop UI.

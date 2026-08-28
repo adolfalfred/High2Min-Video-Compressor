@@ -23,7 +23,11 @@ from .adt_adapters import (
     validate_adapter_order,
 )
 from .adt_planning import APPROVED_HELPERS, analyze_adt_publish, plan_videos
-from .adt_validation import validate_generated_site, validate_staged_diff_contract
+from .adt_validation import (
+    validate_generated_site,
+    validate_staged_diff_contract,
+    validate_staged_generated_site,
+)
 from .compression import validate_candidate
 from .contracts import CONTRACT_SCHEMA_VERSION, ExitCode
 from .diagnostics import DiagnosticLog
@@ -923,7 +927,10 @@ def _synchronize_offline_preloader(
         if not source_path.is_file():
             continue
         if source_path.suffix.lower() == ".html":
-            inline[key] = source_path.read_text(encoding="utf-8")
+            # Use the same byte-aware reader as final validation. Path.read_text()
+            # performs universal-newline translation and would silently turn CRLF
+            # into LF, making an otherwise current offline payload appear stale.
+            inline[key] = TextDocument.read(source_path).text
         elif source_path.suffix.lower() == ".json":
             inline[key] = _read_json(source_path, relative.as_posix())
 
@@ -1612,6 +1619,13 @@ def publish_adt(
             stage,
             plan=publication_plan,
             cache_version=bundle_version,
+        )
+        validate_staged_generated_site(
+            source_book,
+            stage,
+            language=selected_language,
+            page_hrefs=publication_plan.page_hrefs,
+            active_runtime_files=publication_plan.active_runtime_files,
         )
         expected_video_count = len(mappings)
         if validation["video_count"] != expected_video_count:

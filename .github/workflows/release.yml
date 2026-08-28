@@ -160,6 +160,8 @@ jobs:
 
           Windows compression jobs keep FFmpeg and FFprobe child processes hidden. In the desktop interface, **Publish ADT** verifies repository permissions and storage, stages only files that can change, reports real progress through final validation and cleanup, and uses a durable recovery journal with rename-based rollback. It keeps the hand-sign control available, permits voice-over narration and sign-language video to play together, and never creates, replaces, or modifies ZIP packages. The desktop app checks for a newer public release in the background and asks before opening its verified GitHub page.
 
+          ADT offline-preloader updates preserve authored HTML line endings and UTF-8 BOM behavior. Embedded HTML, configuration, and video mappings are validated in staging before any repository files are replaced.
+
           The binaries are not Authenticode- or Apple Developer ID-signed. macOS bundles have ad-hoc integrity signatures, but Windows SmartScreen and macOS Gatekeeper publisher warnings are still expected. Verify the matching SHA-256 file and GitHub provenance attestation before opening a downloaded archive.
 
           Verify provenance with:
