@@ -667,21 +667,33 @@ def _update_in_place_manifest(
     page_hrefs: tuple[str, ...],
     offline_resource_files: tuple[str, ...],
     active_offline_preloaders: tuple[str, ...],
-    videos: tuple[PageVideo, ...],
-    mode: str,
 ) -> tuple[str, ...]:
     prefix = f"content/i18n/{language}/video/".casefold()
+    mappings_path = stage / "content" / "i18n" / language / "videos.json"
+    mappings = _read_json(mappings_path, f"staged {language}/videos.json")
+    if not isinstance(mappings, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in mappings.items()
+    ):
+        raise PublishFailedError("Staged videos.json must contain string mappings.")
+    mapped_video_files = {
+        f"content/i18n/{language}/video/{filename}"
+        for filename in mappings.values()
+    }
+    mapped_video_keys = {relative.casefold() for relative in mapped_video_files}
     files = {
         relative
         for relative in declared
         if _overlay_file(source, stage, relative).is_file()
+        and (
+            not relative.casefold().startswith(prefix)
+            or relative.casefold() in mapped_video_keys
+        )
     }
     files.update(page_hrefs)
     files.update(offline_resource_files)
     files.update(active_offline_preloaders)
-    if mode == "replace":
-        files = {relative for relative in files if not relative.casefold().startswith(prefix)}
-    files.update(f"content/i18n/{language}/video/{item.filename}" for item in videos)
+    files.update(mapped_video_files)
     files.add(f"content/i18n/{language}/videos.json")
     for relative in ESSENTIAL_SITE_RELATIVES:
         if (source / relative).is_file() or (stage / relative).is_file():
@@ -712,6 +724,7 @@ def _validate_staged_in_place(
     *,
     language: str,
     mode: str = "replace",
+    removals: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Validate a minimal staged overlay without materializing another website copy."""
 
@@ -736,18 +749,30 @@ def _validate_staged_in_place(
         match = re.fullmatch(r"video-([1-9][0-9]*)", str(key))
         if not match or int(match.group(1)) > page_count:
             raise PublishFailedError(f"Staged videos.json contains an invalid key: '{key}'.")
-        expected = f"page_{int(match.group(1))}.mp4"
-        staged_video = video_root / expected
-        source_video = source / "content" / "i18n" / language / "video" / expected
+        if not isinstance(filename, str) or PurePosixPath(filename).name != filename:
+            raise PublishFailedError(f"Staged videos.json contains an unsafe filename for '{key}'.")
+        staged_video = video_root / filename
+        source_video = source / "content" / "i18n" / language / "video" / filename
         exists = staged_video.is_file() or (mode == "merge" and source_video.is_file())
-        if filename != expected or not exists:
-            raise PublishFailedError(f"Staged mapping '{key}' must point to an existing '{expected}'.")
-        expected_files.add(expected.casefold())
+        if not exists:
+            raise PublishFailedError(f"Staged mapping '{key}' must point to an existing '{filename}'.")
+        if filename.casefold() in expected_files:
+            raise PublishFailedError(f"Staged videos.json maps a file more than once: '{filename}'.")
+        expected_files.add(filename.casefold())
     actual_files = {path.name.casefold() for path in video_root.glob("*.mp4") if path.is_file()}
     if mode == "merge":
         source_video_root = source / "content" / "i18n" / language / "video"
+        removed_files = {
+            PurePosixPath(relative).name.casefold()
+            for relative in removals
+            if relative.casefold().startswith(
+                f"content/i18n/{language}/video/".casefold()
+            )
+        }
         actual_files.update(
-            path.name.casefold() for path in source_video_root.glob("*.mp4") if path.is_file()
+            path.name.casefold()
+            for path in source_video_root.glob("*.mp4")
+            if path.is_file() and path.name.casefold() not in removed_files
         )
     if actual_files != expected_files:
         raise PublishFailedError("The staged video directory and videos.json do not match exactly.")
@@ -1037,9 +1062,6 @@ def validate_adt_website(
             raise PublishFailedError(f"videos.json contains an invalid key: '{key}'.")
         if not isinstance(filename, str) or PurePosixPath(filename).name != filename:
             raise PublishFailedError(f"videos.json contains an unsafe filename for '{key}'.")
-        expected = f"page_{int(match.group(1))}.mp4"
-        if filename != expected:
-            raise PublishFailedError(f"Mapping '{key}' must point to '{expected}'.")
         if filename.casefold() in mapped_files:
             raise PublishFailedError(f"videos.json maps a file more than once: '{filename}'.")
         mapped_files.add(filename.casefold())
@@ -1455,7 +1477,7 @@ def publish_adt(
     )
     if publication_plan.blockers:
         raise PublishFailedError(" ".join(publication_plan.blockers))
-    if publication_plan.removals and not confirm_removals:
+    if mode == "replace" and publication_plan.removals and not confirm_removals:
         raise InvalidInputError(
             f"Replace mode would remove {len(publication_plan.removals)} existing video file(s). "
             "Review publish-plan, then pass confirm_removals=True or --confirm-removals."
@@ -1596,6 +1618,10 @@ def publish_adt(
                 active_offline_preloaders=publication_plan.active_offline_preloaders,
                 active_runtime_files=publication_plan.active_runtime_files,
             )
+        for relative_text in publication_plan.removals:
+            staged_removal = stage / Path(*PurePosixPath(relative_text).parts)
+            if staged_removal.is_file():
+                staged_removal.unlink()
         stage_video_root = stage / "content" / "i18n" / selected_language / "video"
         stage_video_root.mkdir(parents=True, exist_ok=True)
         mappings: dict[str, str] = (
@@ -1682,14 +1708,13 @@ def publish_adt(
                 page_hrefs=publication_plan.page_hrefs,
                 offline_resource_files=publication_plan.offline_resource_files,
                 active_offline_preloaders=publication_plan.active_offline_preloaders,
-                videos=items,
-                mode=mode,
             )
             validation = _validate_staged_in_place(
                 source_book,
                 stage,
                 language=selected_language,
                 mode=mode,
+                removals=publication_plan.removals,
             )
         else:
             _update_manifest(stage)

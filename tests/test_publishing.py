@@ -308,6 +308,104 @@ class PublishingTests(unittest.TestCase):
             self.assertEqual(mappings, {"video-1": "page_1.mp4", "video-2": "page_2.mp4"})
             self.assertEqual(marker.read_text(encoding="utf-8"), "preserve me")
 
+    def test_merge_mode_preserves_untouched_legacy_video_filenames(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root, existing_video=True)
+            language = book / "content" / "i18n" / "en-GB"
+            legacy_name = "sl_pg002_sec001.mp4"
+            (language / "video" / "page_2.mp4").replace(language / "video" / legacy_name)
+            (language / "videos.json").write_text(
+                json.dumps({"video-2": legacy_name}), encoding="utf-8"
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            mappings = json.loads((language / "videos.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                mappings,
+                {"video-1": "page_1.mp4", "video-2": legacy_name},
+            )
+            self.assertTrue((language / "video" / legacy_name).is_file())
+            self.assertEqual(
+                validate_adt_website(book, allow_unmanifested=True)["video_count"],
+                2,
+            )
+
+    def test_merge_mode_removes_superseded_legacy_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root, existing_video=True)
+            language = book / "content" / "i18n" / "en-GB"
+            legacy_name = "sl_pg002_sec001.mp4"
+            legacy = language / "video" / legacy_name
+            (language / "video" / "page_2.mp4").replace(legacy)
+            (language / "videos.json").write_text(
+                json.dumps({"video-2": legacy_name}), encoding="utf-8"
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_2.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            mappings = json.loads((language / "videos.json").read_text(encoding="utf-8"))
+            replacement = language / "video" / "page_2.mp4"
+            self.assertEqual(mappings, {"video-2": "page_2.mp4"})
+            self.assertEqual(replacement.read_bytes(), b"replacement")
+            self.assertFalse(legacy.exists())
+            declared = declared_manifest_files(book / "imsmanifest.xml")
+            self.assertIn("content/i18n/en-GB/video/page_2.mp4", declared)
+            self.assertNotIn(f"content/i18n/en-GB/video/{legacy_name}", declared)
+
+    def test_copy_publish_replaces_one_legacy_video_without_changing_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root, existing_video=True)
+            language = book / "content" / "i18n" / "en-GB"
+            legacy_name = "sl_pg002_sec001.mp4"
+            legacy = language / "video" / legacy_name
+            (language / "video" / "page_2.mp4").replace(legacy)
+            (language / "videos.json").write_text(
+                json.dumps({"video-2": legacy_name}), encoding="utf-8"
+            )
+            write_manifest(book)
+            before = hash_tree(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_2.mp4").write_bytes(b"replacement")
+            output = root / "published"
+
+            publish_adt(
+                videos,
+                book=book,
+                output=output,
+                in_place=False,
+                validate_media=False,
+            )
+
+            published_language = output / "content" / "i18n" / "en-GB"
+            mappings = json.loads(
+                (published_language / "videos.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(mappings, {"video-2": "page_2.mp4"})
+            self.assertEqual(
+                (published_language / "video" / "page_2.mp4").read_bytes(),
+                b"replacement",
+            )
+            self.assertFalse((published_language / "video" / legacy_name).exists())
+            self.assertEqual(hash_tree(book), before)
+            self.assertTrue(legacy.is_file())
+            self.assertEqual(
+                validate_adt_website(output, allow_unmanifested=True)["video_count"],
+                1,
+            )
+
     def test_replace_mode_requires_explicit_confirmation_for_removals(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

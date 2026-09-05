@@ -632,6 +632,13 @@ def analyze_adt_publish(
 
     desired = {item.mapping_key: item.destination_filename for item in planned}
     removals: list[str] = []
+    for item in planned:
+        existing_filename = existing.get(item.mapping_key)
+        if (
+            existing_filename is not None
+            and existing_filename.casefold() != item.destination_filename.casefold()
+        ):
+            removals.append(f"content/i18n/{selected}/video/{existing_filename}")
     if mode == "replace":
         for key, filename in existing.items():
             if key not in desired:

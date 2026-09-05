@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.4 - 2026-09-05
+
+- Preserve untouched existing ADT videos and mappings that use legacy filenames such as `sl_pg001_sec001.mp4` during merge publishing.
+- Replace only selected pages with canonical `page_N.mp4` files and remove each replaced page's superseded legacy file.
+- Generate manifest declarations from the final staged mapping so mixed legacy and canonical video collections validate correctly.
+- Add in-place and copied-publication regression coverage for partial replacements in legacy-video books.
+
 ## 0.11.3 - 2026-08-28
 
 - Discover every offline preloader referenced by active ADT pages, including renamed variants such as `offline-preloader-fixed.js`.

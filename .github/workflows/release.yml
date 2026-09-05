@@ -164,6 +164,8 @@ jobs:
 
           Legacy ADT manifests can be repaired safely when they omit active pages or offline reader resources, or contain stale declarations for files that no longer exist. Query-bearing page hrefs are supported, inactive HTML stays byte-identical, and Git inspection remains terminal-free in the Windows desktop app.
 
+          Merge publishing preserves untouched videos that use legacy filenames such as `sl_pg001_sec001.mp4`. Selected replacement pages are published with canonical `page_N.mp4` names, and only the superseded files for those pages are removed.
+
           The binaries are not Authenticode- or Apple Developer ID-signed. macOS bundles have ad-hoc integrity signatures, but Windows SmartScreen and macOS Gatekeeper publisher warnings are still expected. Verify the matching SHA-256 file and GitHub provenance attestation before opening a downloaded archive.
 
           Verify provenance with:
