@@ -162,6 +162,8 @@ jobs:
 
           ADT offline-preloader updates preserve authored HTML line endings and UTF-8 BOM behavior. Embedded HTML, configuration, and video mappings are validated in staging before any repository files are replaced.
 
+          Split offline readers are supported when the active `offline-preloader.js` safely loads its `INLINE` resource map from a local payload such as `assets/offline-data.js`. High2Min versions both references, updates the payload, and validates both JavaScript wrappers transactionally.
+
           Legacy ADT manifests can be repaired safely when they omit active pages or offline reader resources, or contain stale declarations for files that no longer exist. Query-bearing page hrefs are supported, inactive HTML stays byte-identical, and Git inspection remains terminal-free in the Windows desktop app.
 
           Merge publishing preserves untouched videos that use legacy filenames such as `sl_pg001_sec001.mp4`. Selected replacement pages are published with canonical `page_N.mp4` names, and only the superseded files for those pages are removed.

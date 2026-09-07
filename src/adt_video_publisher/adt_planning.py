@@ -329,6 +329,69 @@ def _inspect_offline_preloader(path: Path) -> tuple[str, dict[str, object] | Non
     return "javascript-object", payload
 
 
+def _external_inline_payload(
+    book: Path,
+    source: str,
+    referring_pages: Iterable[str],
+) -> tuple[str, dict[str, object]] | None:
+    """Resolve one local script loaded by a wrapper that owns the INLINE map."""
+
+    page_hrefs = tuple(referring_pages) or ("index.html",)
+    candidates: dict[str, dict[str, object]] = {}
+    for match in SCRIPT_SOURCE_PATTERN.finditer(source):
+        raw = match.group("src").split("?", 1)[0].split("#", 1)[0]
+        if not raw or raw.startswith("//") or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", raw):
+            continue
+        resolved: set[str] = set()
+        try:
+            for href in page_hrefs:
+                relative = (
+                    posixpath.normpath(raw.lstrip("/"))
+                    if raw.startswith("/")
+                    else posixpath.normpath(
+                        posixpath.join(PurePosixPath(href).parent.as_posix(), raw)
+                    )
+                )
+                resolved.add(_safe_relative(relative))
+        except PublishFailedError:
+            continue
+        if len(resolved) != 1:
+            continue
+        relative = resolved.pop()
+        if PurePosixPath(relative).suffix.casefold() != ".js":
+            continue
+        payload_format, payload = _inspect_offline_preloader(
+            book / Path(*PurePosixPath(relative).parts)
+        )
+        if payload_format == "javascript-object" and payload is not None:
+            candidates[relative] = payload
+    if len(candidates) != 1:
+        return None
+    return next(iter(candidates.items()))
+
+
+def _inspect_active_offline_preloader(
+    book: Path,
+    relative: str,
+    referring_pages: Iterable[str],
+) -> tuple[str, dict[str, object] | None, str | None]:
+    path = book / Path(*PurePosixPath(relative).parts)
+    preloader_format, payload = _inspect_offline_preloader(path)
+    if payload is not None:
+        return preloader_format, payload, relative
+    if preloader_format != "unsupported":
+        return preloader_format, None, None
+    try:
+        source = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return "unreadable", None, None
+    external = _external_inline_payload(book, source, referring_pages)
+    if external is None:
+        return preloader_format, None, None
+    payload_relative, external_payload = external
+    return "javascript-object", external_payload, payload_relative
+
+
 def _offline_resource_files(book: Path, payload: dict[str, object]) -> tuple[str, ...]:
     """Return existing local HTML/JSON sources represented by an INLINE payload."""
 
@@ -418,6 +481,7 @@ class AdtPublishPlan:
     helper_files: dict[str, dict[str, object]]
     active_offline_preloaders: tuple[str, ...]
     offline_preloader_formats: dict[str, str]
+    offline_preloader_payload_files: dict[str, str]
     offline_preloader_recoveries: dict[str, str]
     offline_preloader_format: str
     offline_resource_files: tuple[str, ...]
@@ -513,12 +577,18 @@ def analyze_adt_publish(
     active_preloaders = tuple(sorted(preloader_locations, key=str.casefold))
     preloader_formats: dict[str, str] = {}
     preloader_payloads: dict[str, dict[str, object]] = {}
+    preloader_payload_files: dict[str, str] = {}
     for relative in active_preloaders:
-        path = root / Path(*PurePosixPath(relative).parts)
-        preloader_format, payload = _inspect_offline_preloader(path)
+        preloader_format, payload, payload_relative = _inspect_active_offline_preloader(
+            root,
+            relative,
+            preloader_locations[relative],
+        )
         preloader_formats[relative] = preloader_format
         if payload is not None:
             preloader_payloads[relative] = payload
+        if payload_relative is not None:
+            preloader_payload_files[relative] = payload_relative
 
     valid_preloaders = sorted(
         preloader_payloads,
@@ -540,9 +610,16 @@ def analyze_adt_publish(
         )
 
     offline_resources = tuple(sorted({
-        resource
-        for payload in preloader_payloads.values()
-        for resource in _offline_resource_files(root, payload)
+        *(
+            payload_relative
+            for loader, payload_relative in preloader_payload_files.items()
+            if payload_relative != loader
+        ),
+        *(
+            resource
+            for payload in preloader_payloads.values()
+            for resource in _offline_resource_files(root, payload)
+        ),
     }, key=str.casefold))
     if not active_preloaders:
         offline_format = "absent"
@@ -593,6 +670,12 @@ def analyze_adt_publish(
                 f"Active offline preloader '{relative}' has invalid JSON; High2Min will "
                 f"recover its resource map from '{recovery}' before publishing."
             )
+    for relative, payload_relative in preloader_payload_files.items():
+        if payload_relative != relative:
+            warnings.append(
+                f"Active offline preloader '{relative}' loads its INLINE resource map from "
+                f"'{payload_relative}'; High2Min will synchronize both files."
+            )
     if manifest_recoveries:
         warnings.append(
             f"The manifest omits {len(manifest_recoveries)} required active/offline resource(s); "
@@ -611,6 +694,7 @@ def analyze_adt_publish(
         "imsmanifest.xml",
     }
     mutations.update(active_preloaders)
+    mutations.update(preloader_payload_files.values())
     for kind, relative in APPROVED_HELPERS.items():
         path = root / Path(*PurePosixPath(relative).parts)
         present = path.is_file()
@@ -662,6 +746,7 @@ def analyze_adt_publish(
         helper_files=helper_files,
         active_offline_preloaders=active_preloaders,
         offline_preloader_formats=preloader_formats,
+        offline_preloader_payload_files=preloader_payload_files,
         offline_preloader_recoveries=preloader_recoveries,
         offline_preloader_format=offline_format,
         offline_resource_files=offline_resources,

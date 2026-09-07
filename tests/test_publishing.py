@@ -884,6 +884,68 @@ class PublishingTests(unittest.TestCase):
             )
             self.assertEqual(inline["./index.html"], updated_index)
 
+    def test_publish_refreshes_external_offline_payload_and_loader_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            index = book / "index.html"
+            index.write_text(
+                '<title>Test</title>'
+                '<script src="./assets/offline-preloader.js?v=7"></script>'
+                '<script src="./assets/base.bundle.local.js?v=7"></script>',
+                encoding="utf-8",
+            )
+            preloader = book / "assets" / "offline-preloader.js"
+            preloader.write_text(
+                "// Load embedded data only for direct offline reading.\n"
+                "(function(){\n"
+                "  if(window.location.protocol===\"file:\"){\n"
+                "    document.write('<script src=\"./assets/offline-data.js?v=49\"><\\/script>');\n"
+                "  }\n"
+                "})();\n",
+                encoding="utf-8",
+            )
+            offline_data = book / "assets" / "offline-data.js"
+            offline_data.write_text(
+                "// external offline resources\n"
+                "(function () {\n"
+                "  var INLINE = "
+                + json.dumps(
+                    {
+                        "./assets/config.json": json.loads(
+                            (book / "assets" / "config.json").read_text(encoding="utf-8")
+                        ),
+                        "./content/i18n/en-GB/videos.json": {},
+                        "./index.html": index.read_text(encoding="utf-8"),
+                    },
+                    separators=(",", ":"),
+                )
+                + ";\n  var BASE_DIR = \"\";\n})();\n",
+                encoding="utf-8",
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            updated_index = index.read_text(encoding="utf-8")
+            updated_preloader = preloader.read_text(encoding="utf-8")
+            inline = read_offline_inline(offline_data)
+            self.assertIn("offline-preloader.js?v=8", updated_index)
+            self.assertIn("offline-data.js?v=8", updated_preloader)
+            self.assertNotIn("offline-data.js?v=49", updated_preloader)
+            self.assertEqual(inline["./assets/config.json"]["bundleVersion"], "8")
+            self.assertEqual(
+                inline["./content/i18n/en-GB/videos.json"],
+                {"video-1": "page_1.mp4"},
+            )
+            self.assertEqual(inline["./index.html"], updated_index)
+            declared = declared_manifest_files(book / "imsmanifest.xml")
+            self.assertIn("assets/offline-preloader.js", declared)
+            self.assertIn("assets/offline-data.js", declared)
+
     def test_publish_preserves_crlf_and_bom_in_offline_embedded_html(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

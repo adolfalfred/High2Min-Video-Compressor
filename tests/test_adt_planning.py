@@ -238,6 +238,44 @@ class AdtPlanningTests(unittest.TestCase):
             self.assertIn("assets/offline-preloader.js", plan.mutations)
             self.assertTrue(any("invalid JSON" in warning for warning in plan.warnings))
 
+    def test_analyzer_resolves_external_offline_inline_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_profile(root)
+            preloader = book / "assets" / "offline-preloader.js"
+            payload = book / "assets" / "offline-data.js"
+            payload.write_text(preloader.read_text(encoding="utf-8"), encoding="utf-8")
+            preloader.write_text(
+                "// Load embedded data only for direct offline reading.\n"
+                "(function(){\n"
+                "  if(window.location.protocol===\"file:\"){\n"
+                "    document.write('<script src=\"./assets/offline-data.js?v=49\"><\\/script>');\n"
+                "  }\n"
+                "})();\n",
+                encoding="utf-8",
+            )
+            videos = root / "videos"
+            videos.mkdir()
+            (videos / "page 1.mp4").write_bytes(b"replacement")
+            before = tree_hash(book)
+
+            plan = analyze_adt_publish(videos, book=book)
+
+            self.assertEqual(tree_hash(book), before)
+            self.assertTrue(plan.ready, plan.blockers)
+            self.assertEqual(
+                plan.offline_preloader_formats,
+                {"assets/offline-preloader.js": "javascript-object"},
+            )
+            self.assertEqual(
+                plan.offline_preloader_payload_files,
+                {"assets/offline-preloader.js": "assets/offline-data.js"},
+            )
+            self.assertIn("assets/offline-data.js", plan.offline_resource_files)
+            self.assertIn("assets/offline-data.js", plan.manifest_recoveries)
+            self.assertIn("assets/offline-data.js", plan.mutations)
+            self.assertTrue(any("synchronize both files" in warning for warning in plan.warnings))
+
     def test_analyzer_blocks_unrecoverable_active_preloader(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

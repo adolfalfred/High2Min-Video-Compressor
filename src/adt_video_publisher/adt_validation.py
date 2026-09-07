@@ -44,6 +44,32 @@ def _version_reference(match: re.Match[str], version: str) -> str:
     return f"{match.group('path')}?{'&'.join(parts)}{match.group('fragment') or ''}"
 
 
+def _external_payload_reference_pattern(payload_relative: str) -> re.Pattern[str]:
+    payload = PurePosixPath(payload_relative).as_posix()
+    return re.compile(
+        r"(?<![A-Za-z0-9/._:+-])(?P<path>(?:\.\./|\./|/)*"
+        + re.escape(payload)
+        + r")"
+        r"(?P<query>\?[^#\"'<>\s]*)?(?P<fragment>#[^\"'<>\s]*)?"
+    )
+
+
+def _version_external_payload_reference(
+    source: str,
+    payload_relative: str,
+    version: str,
+) -> str:
+    updated, count = _external_payload_reference_pattern(payload_relative).subn(
+        lambda match: _version_reference(match, version),
+        source,
+    )
+    if count == 0:
+        raise PublishFailedError(
+            f"Offline preloader does not reference its external payload '{payload_relative}'."
+        )
+    return updated
+
+
 def expected_published_html(
     source: str,
     *,
@@ -212,19 +238,43 @@ def validate_staged_diff_contract(
         if generated_path.read_bytes() != source_document.encode(expected):
             raise PublishFailedError(f"Page '{href}' changed outside approved helper and cache references.")
 
+    processed_payloads: set[str] = set()
     for relative_text in plan.active_offline_preloaders:
-        relative = Path(*PurePosixPath(relative_text).parts)
-        source_preloader = source / relative
-        generated_preloader = generated / relative
-        if not source_preloader.is_file() or not generated_preloader.is_file():
-            raise PublishFailedError(f"Active offline preloader is missing: '{relative_text}'.")
-        source_text = TextDocument.read(source_preloader).text
-        generated_text = TextDocument.read(generated_preloader).text
+        payload_text = plan.offline_preloader_payload_files.get(relative_text, relative_text)
+        if payload_text != relative_text:
+            relative = Path(*PurePosixPath(relative_text).parts)
+            source_preloader = source / relative
+            generated_preloader = generated / relative
+            if not source_preloader.is_file() or not generated_preloader.is_file():
+                raise PublishFailedError(f"Active offline preloader is missing: '{relative_text}'.")
+            source_document = TextDocument.read(source_preloader)
+            expected = _version_external_payload_reference(
+                source_document.text,
+                payload_text,
+                cache_version,
+            )
+            if generated_preloader.read_bytes() != source_document.encode(expected):
+                raise PublishFailedError(
+                    f"Offline preloader '{relative_text}' changed outside its external payload cache reference."
+                )
+        if payload_text in processed_payloads:
+            continue
+        processed_payloads.add(payload_text)
+        payload_relative = Path(*PurePosixPath(payload_text).parts)
+        source_payload = source / payload_relative
+        generated_payload = generated / payload_relative
+        if not source_payload.is_file() or not generated_payload.is_file():
+            raise PublishFailedError(f"Offline preloader payload is missing: '{payload_text}'.")
+        source_text = TextDocument.read(source_payload).text
+        generated_text = TextDocument.read(generated_payload).text
         source_start, source_end = _inline_json_span(source_text)
         generated_start, generated_end = _inline_json_span(generated_text)
-        if source_text[:source_start] != generated_text[:generated_start] or source_text[source_end:] != generated_text[generated_end:]:
+        if (
+            source_text[:source_start] != generated_text[:generated_start]
+            or source_text[source_end:] != generated_text[generated_end:]
+        ):
             raise PublishFailedError(
-                f"Offline preloader '{relative_text}' changed outside its generated INLINE map."
+                f"Offline preloader payload '{payload_text}' changed outside its generated INLINE map."
             )
 
     _validate_local_references(source, generated, plan.page_hrefs)
@@ -245,6 +295,7 @@ def _validate_generated_site_overlay(
     page_hrefs: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
     active_offline_preloaders: tuple[str, ...],
+    offline_preloader_payload_files: dict[str, str] | None = None,
 ) -> None:
     """Validate a generated site, resolving unchanged files from an optional source overlay."""
 
@@ -259,21 +310,37 @@ def _validate_generated_site_overlay(
             _validate_javascript_structure(
                 _overlay_path(source_book, generated_book, relative)
             )
+    payload_files = {relative: relative for relative in active_offline_preloaders}
+    payload_files.update(offline_preloader_payload_files or {})
+    processed_payloads: set[str] = set()
     for relative_text in active_offline_preloaders:
         preloader = _overlay_path(source_book, generated_book, relative_text)
         if not preloader.is_file():
             raise PublishFailedError(f"Active offline preloader is missing: '{relative_text}'.")
-        source = TextDocument.read(preloader).text
-        start, end = _inline_json_span(source)
+        payload_text = payload_files[relative_text]
+        if payload_text != relative_text and not _external_payload_reference_pattern(
+            payload_text
+        ).search(TextDocument.read(preloader).text):
+            raise PublishFailedError(
+                f"Offline preloader '{relative_text}' does not load '{payload_text}'."
+            )
+        if payload_text in processed_payloads:
+            continue
+        processed_payloads.add(payload_text)
+        payload = _overlay_path(source_book, generated_book, payload_text)
+        if not payload.is_file():
+            raise PublishFailedError(f"Offline preloader payload is missing: '{payload_text}'.")
+        payload_source = TextDocument.read(payload).text
+        start, end = _inline_json_span(payload_source)
         try:
-            inline = json.loads(source[start:end])
+            inline = json.loads(payload_source[start:end])
         except json.JSONDecodeError as exc:
             raise PublishFailedError(
-                f"Offline preloader '{relative_text}' INLINE map is invalid JSON."
+                f"Offline preloader payload '{payload_text}' INLINE map is invalid JSON."
             ) from exc
         if not isinstance(inline, dict):
             raise PublishFailedError(
-                f"Offline preloader '{relative_text}' INLINE map must contain an object."
+                f"Offline preloader payload '{payload_text}' INLINE map must contain an object."
             )
         expected = {
             "./assets/config.json": _json_object(
@@ -292,7 +359,7 @@ def _validate_generated_site_overlay(
         for key, value in expected.items():
             if inline.get(key) != value:
                 raise PublishFailedError(
-                    f"Offline preloader '{relative_text}' has stale embedded value for '{key}'."
+                    f"Offline preloader payload '{payload_text}' has stale embedded value for '{key}'."
                 )
         for key, value in inline.items():
             if not isinstance(key, str) or not key.endswith(".html") or not isinstance(value, str):
@@ -301,7 +368,7 @@ def _validate_generated_site_overlay(
             path = _overlay_path(source_book, generated_book, relative)
             if path.is_file() and value != TextDocument.read(path).text:
                 raise PublishFailedError(
-                    f"Offline preloader '{relative_text}' has stale embedded HTML for '{key}'."
+                    f"Offline preloader payload '{payload_text}' has stale embedded HTML for '{key}'."
                 )
 
 
@@ -313,6 +380,7 @@ def validate_staged_generated_site(
     page_hrefs: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
     active_offline_preloaders: tuple[str, ...],
+    offline_preloader_payload_files: dict[str, str] | None = None,
 ) -> None:
     """Validate a minimal in-place staging overlay before repository files are replaced."""
 
@@ -323,6 +391,7 @@ def validate_staged_generated_site(
         page_hrefs=page_hrefs,
         active_runtime_files=active_runtime_files,
         active_offline_preloaders=active_offline_preloaders,
+        offline_preloader_payload_files=offline_preloader_payload_files,
     )
 
 
@@ -333,6 +402,7 @@ def validate_generated_site(
     page_hrefs: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
     active_offline_preloaders: tuple[str, ...],
+    offline_preloader_payload_files: dict[str, str] | None = None,
 ) -> None:
     """Validate local references, helper order, JS structure, and offline embedded data."""
 
@@ -343,4 +413,5 @@ def validate_generated_site(
         page_hrefs=page_hrefs,
         active_runtime_files=active_runtime_files,
         active_offline_preloaders=active_offline_preloaders,
+        offline_preloader_payload_files=offline_preloader_payload_files,
     )

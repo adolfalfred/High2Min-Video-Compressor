@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.5 - 2026-09-07
+
+- Support split offline readers where `assets/offline-preloader.js` loads the `INLINE` resource map from a local file such as `assets/offline-data.js`.
+- Resolve external payload scripts relative to the active ADT pages and reject ambiguous, external, or escaping references.
+- Refresh the external payload's embedded configuration, video mappings, JSON, and HTML while preserving the loader and payload wrappers.
+- Advance cache versions in both page-to-loader and loader-to-payload references, recover both files in the manifest, and validate them before committing.
+- Add regression coverage modeled on the Kusoma Standard 1 split-preloader repository.
+
 ## 0.11.4 - 2026-09-05
 
 - Preserve untouched existing ADT videos and mappings that use legacy filenames such as `sl_pg001_sec001.mp4` during merge publishing.

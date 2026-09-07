@@ -923,6 +923,29 @@ def _versioned_reference(match: re.Match[str], version: str) -> str:
     return f"{match.group('path')}?{'&'.join(parts)}{match.groupdict().get('fragment') or ''}"
 
 
+def _version_external_payload_reference(
+    source: str,
+    payload_relative: str,
+    version: str,
+) -> str:
+    payload = _safe_archive_path(payload_relative).as_posix()
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9/._:+-])(?P<path>(?:\.\./|\./|/)*"
+        + re.escape(payload)
+        + r")"
+        r"(?P<query>\?[^#\"'<>\s]*)?(?P<fragment>#[^\"'<>\s]*)?"
+    )
+    updated, count = pattern.subn(
+        lambda match: _versioned_reference(match, version),
+        source,
+    )
+    if count == 0:
+        raise PublishFailedError(
+            f"Offline preloader does not reference its external payload '{payload_relative}'."
+        )
+    return updated
+
+
 def _synchronize_offline_preloader(
     book: Path,
     *,
@@ -930,6 +953,7 @@ def _synchronize_offline_preloader(
     bundle_version: str,
     page_hrefs: tuple[str, ...],
     active_offline_preloaders: tuple[str, ...] | None = None,
+    offline_preloader_payload_files: dict[str, str] | None = None,
     offline_preloader_recoveries: dict[str, str] | None = None,
 ) -> tuple[Path, ...]:
     """Refresh every active offline preloader without changing its authored wrapper."""
@@ -963,33 +987,59 @@ def _synchronize_offline_preloader(
             else ()
         )
     recoveries = offline_preloader_recoveries or {}
-    documents: dict[str, tuple[TextDocument, str, int, int]] = {}
-    valid_payloads: dict[str, dict[str, object]] = {}
+    payload_files = {relative: relative for relative in selected}
+    payload_files.update(offline_preloader_payload_files or {})
     for relative_text in selected:
+        payload_text = payload_files[relative_text]
+        if payload_text == relative_text:
+            continue
         relative = _safe_archive_path(relative_text)
         preloader = book / Path(*relative.parts)
         if not preloader.is_file():
             raise PublishFailedError(f"Active offline preloader is missing: '{relative_text}'.")
         document = TextDocument.read(preloader)
+        updated = _version_external_payload_reference(
+            document.text,
+            payload_text,
+            bundle_version,
+        )
+        if updated != document.text:
+            preloader.write_bytes(document.encode(updated))
+            changed.append(Path(*relative.parts))
+
+    documents: dict[str, tuple[TextDocument, str, int, int]] = {}
+    valid_payloads: dict[str, dict[str, object]] = {}
+    payload_owners: dict[str, str] = {}
+    for relative_text in selected:
+        payload_text = payload_files[relative_text]
+        payload_owners.setdefault(payload_text, relative_text)
+        if payload_text in documents:
+            continue
+        relative = _safe_archive_path(payload_text)
+        payload_path = book / Path(*relative.parts)
+        if not payload_path.is_file():
+            raise PublishFailedError(f"Offline preloader payload is missing: '{payload_text}'.")
+        document = TextDocument.read(payload_path)
         source = document.text
         payload_start, payload_end = _inline_json_span(source)
-        documents[relative_text] = (document, source, payload_start, payload_end)
+        documents[payload_text] = (document, source, payload_start, payload_end)
         try:
             payload = json.loads(source[payload_start:payload_end])
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
-            valid_payloads[relative_text] = payload
+            valid_payloads[payload_text] = payload
 
-    for relative_text in selected:
-        document, source, payload_start, payload_end = documents[relative_text]
-        inline = valid_payloads.get(relative_text)
+    for payload_text, (document, source, payload_start, payload_end) in documents.items():
+        inline = valid_payloads.get(payload_text)
         if inline is None:
-            recovery_source = recoveries.get(relative_text)
-            recovery = valid_payloads.get(recovery_source or "")
+            owner = payload_owners[payload_text]
+            recovery_source = recoveries.get(owner)
+            recovery_payload = payload_files.get(recovery_source or "", recovery_source or "")
+            recovery = valid_payloads.get(recovery_payload)
             if recovery is None:
                 raise PublishFailedError(
-                    f"Active offline preloader '{relative_text}' has invalid JSON and no valid recovery source."
+                    f"Offline preloader payload '{payload_text}' has invalid JSON and no valid recovery source."
                 )
             inline = copy.deepcopy(recovery)
         else:
@@ -1022,9 +1072,9 @@ def _synchronize_offline_preloader(
         serialized = json.dumps(inline, ensure_ascii=True, separators=(",", ":"))
         updated = source[:payload_start] + serialized + source[payload_end:]
         if updated != source:
-            preloader = book / Path(*_safe_archive_path(relative_text).parts)
-            preloader.write_bytes(document.encode(updated))
-            changed.append(Path(*_safe_archive_path(relative_text).parts))
+            payload_path = book / Path(*_safe_archive_path(payload_text).parts)
+            payload_path.write_bytes(document.encode(updated))
+            changed.append(Path(*_safe_archive_path(payload_text).parts))
     return tuple(dict.fromkeys(changed))
 
 
@@ -1223,6 +1273,7 @@ def _commit_in_place(
     page_hrefs: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
     active_offline_preloaders: tuple[str, ...],
+    offline_preloader_payload_files: dict[str, str],
     reporter: _PublishReporter,
 ) -> None:
     """Commit only allowlisted files and restore them from a durable journal on failure."""
@@ -1295,6 +1346,7 @@ def _commit_in_place(
             page_hrefs=page_hrefs,
             active_runtime_files=active_runtime_files,
             active_offline_preloaders=active_offline_preloaders,
+            offline_preloader_payload_files=offline_preloader_payload_files,
         )
         _verify_zip_sentinels(book, zip_sentinels)
         document["status"] = "committed"
@@ -1695,6 +1747,7 @@ def publish_adt(
             bundle_version=bundle_version,
             page_hrefs=publication_plan.page_hrefs,
             active_offline_preloaders=publication_plan.active_offline_preloaders,
+            offline_preloader_payload_files=publication_plan.offline_preloader_payload_files,
             offline_preloader_recoveries=publication_plan.offline_preloader_recoveries,
         )
         reporter.check_cancelled()
@@ -1738,6 +1791,7 @@ def publish_adt(
             page_hrefs=publication_plan.page_hrefs,
             active_runtime_files=publication_plan.active_runtime_files,
             active_offline_preloaders=publication_plan.active_offline_preloaders,
+            offline_preloader_payload_files=publication_plan.offline_preloader_payload_files,
         )
         expected_video_count = len(mappings)
         if validation["video_count"] != expected_video_count:
@@ -1784,6 +1838,7 @@ def publish_adt(
                 publication_plan.page_hrefs,
                 publication_plan.active_runtime_files,
                 publication_plan.active_offline_preloaders,
+                publication_plan.offline_preloader_payload_files,
                 reporter,
             )
         else:
