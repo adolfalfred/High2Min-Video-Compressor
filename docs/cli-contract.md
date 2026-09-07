@@ -39,7 +39,7 @@ high2min compress --input "D:\videos" --output "D:\videos-compressed" `
   --workers auto --json --progress ndjson
 ```
 
-`publish-plan` is read-only and returns exact ADT spine mappings, active runtime/helper capabilities, Git state, mutations, removals, warnings, blockers, and ZIP sentinels. A video stem may contain any words but must contain exactly one positive number unless a JSON/CSV mapping is provided.
+`publish-plan` is read-only and returns exact ADT spine/runtime mappings, page-index repairs, active runtime/helper capabilities, Git state, mutations, removals, warnings, blockers, and ZIP sentinels. A video stem may contain any words but must contain exactly one non-negative number unless a JSON/CSV mapping is provided. Page zero targets the front cover. If page joins shortened a Git-tracked spine, the publisher can resolve the former source number through a historical `content/pages.json` href. Mapping rows may target a current page number, `target_href`, or `target_section_id`.
 
 `publish` validates every compressed video and defaults to merging mappings. Replace mode requires `--confirm-removals` when existing videos would be deleted. It uses targeted compatibility adapters without modifying runtime bundles or authored CSS, commits allowlisted files transactionally, preserves repository ZIP files, and optionally creates a deterministic ZIP plus SHA-256 sidecar only in separate-output mode.
 

@@ -17,6 +17,7 @@ from .adt_adapters import (
 )
 from .adt_planning import APPROVED_HELPERS, AdtPublishPlan
 from .errors import PublishFailedError
+from .page_identity import replace_page_section_index
 
 LOCAL_REFERENCE_PATTERN: Final = re.compile(
     r"\b(?:src|href)\s*=\s*(['\"])(?P<value>[^'\"]+)\1", re.IGNORECASE
@@ -77,7 +78,15 @@ def expected_published_html(
     active_runtime_files: tuple[str, ...],
     cache_version: str,
     newline: str,
+    page_video_index: int | None = None,
 ) -> str:
+    if page_video_index is not None:
+        try:
+            source = replace_page_section_index(source, page_video_index)
+        except ValueError as exc:
+            raise PublishFailedError(
+                f"Page '{page_href}' cannot receive sign-video index {page_video_index}: {exc}"
+            ) from exc
     updated = inject_adapters_into_html(
         source,
         page_href=page_href,
@@ -234,6 +243,7 @@ def validate_staged_diff_contract(
             active_runtime_files=plan.active_runtime_files,
             cache_version=cache_version,
             newline=source_document.newline,
+            page_video_index=plan.page_video_index_updates.get(href),
         )
         if generated_path.read_bytes() != source_document.encode(expected):
             raise PublishFailedError(f"Page '{href}' changed outside approved helper and cache references.")

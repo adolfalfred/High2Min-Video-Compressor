@@ -10,8 +10,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 from adt_video_publisher import adt_planning
-from adt_video_publisher.adt_planning import analyze_adt_publish, plan_videos
+from adt_video_publisher.adt_planning import (
+    PageTarget,
+    analyze_adt_publish,
+    plan_videos,
+)
 from adt_video_publisher.errors import InvalidInputError
+from adt_video_publisher.page_identity import (
+    page_section_index,
+    replace_page_section_index,
+)
 
 IMS = "http://www.imsproject.org/xsd/imscp_rootv1p1p2"
 
@@ -98,7 +106,7 @@ class AdtPlanningTests(unittest.TestCase):
             self.assertEqual([item.destination_filename for item in items], ["page_2.mp4", "page_13.mp4"])
             self.assertEqual(items[0].page_href, "page-2.html")
 
-    def test_filename_mapping_rejects_zero_and_multiple_numbers(self) -> None:
+    def test_filename_mapping_accepts_cover_zero_and_rejects_multiple_numbers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "lesson_2_take_3.mp4").write_bytes(b"video")
@@ -106,8 +114,61 @@ class AdtPlanningTests(unittest.TestCase):
                 plan_videos(root, page_hrefs=("one.html", "two.html", "three.html"))
             (root / "lesson_2_take_3.mp4").unlink()
             (root / "lesson_000.mp4").write_bytes(b"video")
-            with self.assertRaisesRegex(InvalidInputError, "page zero"):
-                plan_videos(root, page_hrefs=("one.html",))
+            items = plan_videos(
+                root,
+                page_hrefs=("index.html",),
+                page_targets=(PageTarget(1, "index.html", "cover", 0),),
+            )
+
+            self.assertEqual(items[0].page_href, "index.html")
+            self.assertEqual(items[0].mapping_key, "video-0")
+            self.assertEqual(items[0].destination_filename, "page_0.mp4")
+
+    def test_json_mapping_can_target_a_stable_href(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "cover replacement.mp4").write_bytes(b"video")
+            mapping = root / "mapping.json"
+            mapping.write_text(
+                json.dumps(
+                    {
+                        "cover replacement.mp4": {
+                            "target_href": "back_cover.html",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            targets = (
+                PageTarget(1, "index.html", "front", 0),
+                PageTarget(2, "back_cover.html", "back", 0),
+            )
+
+            items = plan_videos(
+                root,
+                page_hrefs=tuple(target.href for target in targets),
+                page_targets=targets,
+                mapping_file=mapping,
+            )
+
+            self.assertEqual(items[0].page_href, "back_cover.html")
+            self.assertEqual(items[0].mapping_key, "video-2")
+            self.assertEqual(items[0].destination_filename, "page_2.mp4")
+
+    def test_page_identity_preserves_meta_tag_formatting(self) -> None:
+        source = (
+            '<meta content="0" data-owner="book" name="page-section-id">\n'
+            '<meta name="description" content="unchanged">'
+        )
+
+        self.assertEqual(page_section_index(source), 0)
+        updated = replace_page_section_index(source, 102)
+        self.assertIn(
+            '<meta content="102" data-owner="book" name="page-section-id">',
+            updated,
+        )
+        self.assertEqual(page_section_index(updated), 102)
+        self.assertIn('<meta name="description" content="unchanged">', updated)
 
     def test_json_mapping_supports_source_names_without_numbers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -139,6 +200,42 @@ class AdtPlanningTests(unittest.TestCase):
             self.assertIn("content/i18n/sw-TZ/video/page_3.mp4", plan.removals)
             self.assertIn("assets/media-playback-independence.js", plan.mutations)
             self.assertIn("index.html", plan.mutations)
+
+    def test_analyzer_assigns_unique_runtime_index_to_unnumbered_back_cover(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_profile(root)
+            pages = (
+                ("index.html", 0),
+                ("pg002_joined.html", 1),
+                ("pg003.html", 0),
+            )
+            for href, page_index in pages:
+                path = book / href
+                path.write_text(
+                    f'<meta name="page-section-id" content="{page_index}">'
+                    + path.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            videos = root / "videos"
+            videos.mkdir()
+            (videos / "Page-0.mp4").write_bytes(b"front")
+            (videos / "Page-3.mp4").write_bytes(b"back")
+            before = tree_hash(book)
+
+            plan = analyze_adt_publish(videos, book=book)
+
+            self.assertEqual(tree_hash(book), before)
+            self.assertTrue(plan.ready, plan.blockers)
+            self.assertEqual(
+                [item.mapping_key for item in plan.videos],
+                ["video-0", "video-3"],
+            )
+            self.assertEqual(plan.page_video_index_updates, {"pg003.html": 3})
+
+            (videos / "Page-3.mp4").unlink()
+            front_only = analyze_adt_publish(videos, book=book)
+            self.assertEqual(front_only.page_video_index_updates, {})
 
     def test_analyzer_reports_recoverable_active_pages_omitted_from_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

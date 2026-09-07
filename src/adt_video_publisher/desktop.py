@@ -896,7 +896,8 @@ def create_application(
                 self._append_log(self.status_var.get())
                 for item in value.videos:
                     self._append_log(
-                        f"{item.source_filename} → ADT page {item.page_index} ({item.page_href}) → {item.destination_filename}"
+                        f"{item.source_filename} → ADT page {item.page_index} ({item.page_href}) "
+                        f"→ {item.mapping_key} / {item.destination_filename}"
                     )
                 for warning in value.warnings:
                     self._append_log(f"Warning: {warning}")

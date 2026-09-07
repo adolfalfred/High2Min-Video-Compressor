@@ -67,7 +67,7 @@
           "output": {"type": "string", "minLength": 1},
           "status": {"const": "completed"},
           "page_index": {"type": "integer", "minimum": 1},
-          "mapping_key": {"type": "string", "pattern": "^video-[1-9][0-9]*$"},
+          "mapping_key": {"type": "string", "pattern": "^video-(0|[1-9][0-9]*)$"},
           "original_bytes": {"type": "integer", "minimum": 1},
           "output_bytes": {"type": "integer", "minimum": 1},
           "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}

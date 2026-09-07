@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Final
 
 from .errors import InvalidInputError, PublishFailedError
+from .page_identity import page_section_index
 from .processes import hidden_process_options
 
 IMS_NAMESPACE: Final = "http://www.imsproject.org/xsd/imscp_rootv1p1p2"
@@ -33,6 +34,33 @@ APPROVED_HELPERS: Final = {
 OFFLINE_PRELOADER_NAME_PATTERN: Final = re.compile(
     r"offline-preloader(?:[-._][A-Za-z0-9_-]+)*\.js$", re.IGNORECASE
 )
+PAGE_SECTION_FAMILY_PATTERN: Final = re.compile(
+    r"^(?P<page>pg[0-9]+)_sec[0-9]+\.html$", re.IGNORECASE
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PageTarget:
+    spine_index: int
+    href: str
+    section_id: str
+    declared_video_index: int
+
+    @property
+    def video_index(self) -> int:
+        # A zero-valued first cover is a valid runtime key. Later zero-valued
+        # covers need a unique key; their current spine position is stable and
+        # remains within the runtime's normal page bounds.
+        if self.declared_video_index == 0 and self.spine_index > 1:
+            return self.spine_index
+        return self.declared_video_index
+
+
+@dataclass(frozen=True, slots=True)
+class MappingTarget:
+    page: int | None = None
+    href: str | None = None
+    section_id: str | None = None
 
 
 def _sha256(path: Path) -> str:
@@ -61,19 +89,36 @@ def _safe_relative(value: str) -> str:
     return path.as_posix()
 
 
-def _page_hrefs(book: Path) -> tuple[str, ...]:
+def _page_targets(book: Path) -> tuple[PageTarget, ...]:
     document = _load_json(book / "content" / "pages.json", "content/pages.json")
     if not isinstance(document, list) or not document:
         raise PublishFailedError("content/pages.json must be a non-empty array.")
-    hrefs: list[str] = []
+    targets: list[PageTarget] = []
     for position, item in enumerate(document, start=1):
         if not isinstance(item, dict) or not isinstance(item.get("href"), str):
             raise PublishFailedError(f"Page entry {position} has no valid href.")
         href = _safe_relative(item["href"])
-        if not (book / Path(*PurePosixPath(href).parts)).is_file():
+        page_path = book / Path(*PurePosixPath(href).parts)
+        if not page_path.is_file():
             raise PublishFailedError(f"Page entry {position} points to a missing file: '{href}'.")
-        hrefs.append(href)
-    return tuple(hrefs)
+        try:
+            source = page_path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError) as exc:
+            raise PublishFailedError(f"ADT page is unreadable: '{page_path}'.") from exc
+        declared_index = page_section_index(source)
+        targets.append(
+            PageTarget(
+                spine_index=position,
+                href=href,
+                section_id=str(item.get("section_id") or ""),
+                declared_video_index=position if declared_index is None else declared_index,
+            )
+        )
+    return tuple(targets)
+
+
+def _page_hrefs(book: Path) -> tuple[str, ...]:
+    return tuple(target.href for target in _page_targets(book))
 
 
 def _select_language(book: Path, language: str | None) -> tuple[dict[str, object], str]:
@@ -116,7 +161,42 @@ def _manifest_files(book: Path) -> tuple[str, ...]:
     return tuple(files)
 
 
-def _mapping_rows(mapping_file: Path) -> dict[str, int]:
+def _parse_mapping_target(source: str, raw: object) -> MappingTarget:
+    if isinstance(raw, dict):
+        raw_page = raw.get("page")
+        raw_href = raw.get("target_href", raw.get("href"))
+        raw_section = raw.get("target_section_id", raw.get("section_id"))
+        supplied = sum(
+            value is not None and value != ""
+            for value in (raw_page, raw_href, raw_section)
+        )
+        if supplied != 1:
+            raise InvalidInputError(
+                f"Mapping for '{source}' must provide exactly one of page, target_href, "
+                "or target_section_id."
+            )
+        if raw_href is not None and raw_href != "":
+            if not isinstance(raw_href, str):
+                raise InvalidInputError(f"Mapping target_href for '{source}' must be text.")
+            return MappingTarget(href=_safe_relative(raw_href))
+        if raw_section is not None and raw_section != "":
+            if not isinstance(raw_section, str):
+                raise InvalidInputError(f"Mapping target_section_id for '{source}' must be text.")
+            return MappingTarget(section_id=raw_section.strip())
+    else:
+        raw_page = raw
+    try:
+        page = int(raw_page)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise InvalidInputError(
+            f"Mapping for '{source}' must use a non-negative page number."
+        ) from exc
+    if page < 0:
+        raise InvalidInputError(f"Mapping for '{source}' must use a non-negative page number.")
+    return MappingTarget(page=page)
+
+
+def _mapping_rows(mapping_file: Path) -> dict[str, MappingTarget]:
     if not mapping_file.is_file():
         raise InvalidInputError(f"Page mapping file does not exist: '{mapping_file}'.")
     values: dict[str, object]
@@ -128,8 +208,10 @@ def _mapping_rows(mapping_file: Path) -> dict[str, int]:
             values = {}
             for position, row in enumerate(loaded, start=1):
                 if not isinstance(row, dict) or not isinstance(row.get("source"), str):
-                    raise InvalidInputError(f"Mapping row {position} needs source and page fields.")
-                values[row["source"]] = row.get("page")
+                    raise InvalidInputError(f"Mapping row {position} needs a source field.")
+                values[row["source"]] = {
+                    key: value for key, value in row.items() if key != "source"
+                }
         else:
             raise InvalidInputError("JSON page mapping must be an object or an array of rows.")
     elif mapping_file.suffix.lower() == ".csv":
@@ -137,30 +219,191 @@ def _mapping_rows(mapping_file: Path) -> dict[str, int]:
         try:
             with mapping_file.open("r", encoding="utf-8-sig", newline="") as stream:
                 reader = csv.DictReader(stream)
-                if not reader.fieldnames or not {"source", "page"}.issubset(reader.fieldnames):
-                    raise InvalidInputError("CSV page mapping needs source and page columns.")
+                target_fields = {
+                    "page", "href", "target_href", "section_id", "target_section_id"
+                }
+                if (
+                    not reader.fieldnames
+                    or "source" not in reader.fieldnames
+                    or not target_fields.intersection(reader.fieldnames)
+                ):
+                    raise InvalidInputError(
+                        "CSV page mapping needs a source column and one target column."
+                    )
                 for row in reader:
-                    values[str(row.get("source", ""))] = row.get("page")
+                    values[str(row.get("source", ""))] = {
+                        key: value for key, value in row.items() if key != "source"
+                    }
         except OSError as exc:
             raise InvalidInputError(f"Page mapping file is unreadable: '{mapping_file}'.") from exc
     else:
         raise InvalidInputError("Page mapping file must use .json or .csv.")
 
-    result: dict[str, int] = {}
-    for source, raw_page in values.items():
+    result: dict[str, MappingTarget] = {}
+    for source, raw_target in values.items():
         if not isinstance(source, str) or not source.strip():
             raise InvalidInputError("Every page mapping source must be a non-empty filename.")
-        try:
-            page = int(raw_page)  # type: ignore[arg-type]
-        except (TypeError, ValueError) as exc:
-            raise InvalidInputError(f"Mapping for '{source}' must use a positive page number.") from exc
-        if page < 1:
-            raise InvalidInputError(f"Mapping for '{source}' must use a positive page number.")
         key = source.casefold()
         if key in result:
             raise InvalidInputError(f"Page mapping repeats source '{source}'.")
-        result[key] = page
+        result[key] = _parse_mapping_target(source, raw_target)
     return result
+
+
+def _video_number(path: Path) -> int:
+    groups = NUMBER_GROUP_PATTERN.findall(path.stem)
+    if len(groups) != 1:
+        raise InvalidInputError(
+            f"Video '{path.name}' must contain exactly one page number, or use --mapping."
+        )
+    return int(groups[0])
+
+
+def _historical_page_hrefs(
+    book: Path,
+    source_pages: set[int],
+    current_hrefs: tuple[str, ...],
+) -> tuple[dict[int, str], str | None]:
+    """Recover an older spine when input numbering exceeds the current ADT spine."""
+
+    positive = {value for value in source_pages if value > 0}
+    if not positive or max(positive) <= len(current_hrefs):
+        return {}, None
+    expected_count = max(positive)
+    try:
+        root_result = subprocess.run(
+            ["git", "-C", str(book), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            **hidden_process_options(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}, None
+    if root_result.returncode != 0:
+        return {}, None
+    git_root = Path(root_result.stdout.strip()).resolve()
+    try:
+        prefix = book.relative_to(git_root).as_posix()
+    except ValueError:
+        return {}, None
+    blob = f"{prefix}/content/pages.json" if prefix else "content/pages.json"
+    try:
+        history = subprocess.run(
+            ["git", "-C", str(git_root), "log", "--format=%H", "--", blob],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            **hidden_process_options(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}, None
+    if history.returncode != 0:
+        return {}, None
+    for commit in history.stdout.splitlines():
+        commit = commit.strip()
+        if not commit:
+            continue
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(git_root), "show", f"{commit}:{blob}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                **hidden_process_options(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return {}, None
+        if result.returncode != 0:
+            continue
+        try:
+            document = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(document, list) or len(document) != expected_count:
+            continue
+        hrefs: list[str] = []
+        valid = True
+        for item in document:
+            if not isinstance(item, dict) or not isinstance(item.get("href"), str):
+                valid = False
+                break
+            try:
+                hrefs.append(_safe_relative(item["href"]))
+            except PublishFailedError:
+                valid = False
+                break
+        if valid:
+            return (
+                {position: href for position, href in enumerate(hrefs, start=1)},
+                commit[:7],
+            )
+    return {}, None
+
+
+def _target_by_href(
+    href: str,
+    page_targets: tuple[PageTarget, ...],
+    *,
+    source_page: int | None = None,
+    notes: list[str] | None = None,
+) -> PageTarget:
+    exact = [target for target in page_targets if target.href.casefold() == href.casefold()]
+    if len(exact) == 1:
+        return exact[0]
+    family = PAGE_SECTION_FAMILY_PATTERN.fullmatch(PurePosixPath(href).name)
+    if family is not None:
+        candidates = [
+            target
+            for target in page_targets
+            if (
+                (candidate := PAGE_SECTION_FAMILY_PATTERN.fullmatch(PurePosixPath(target.href).name))
+                and candidate.group("page").casefold() == family.group("page").casefold()
+            )
+        ]
+        if len(candidates) == 1:
+            target = candidates[0]
+            if notes is not None:
+                label = f"Historical page {source_page}" if source_page is not None else "Mapping target"
+                notes.append(
+                    f"{label} '{href}' was joined into '{target.href}'; verify that the "
+                    "replacement video covers the complete joined page."
+                )
+            return target
+    raise InvalidInputError(
+        f"The mapped ADT page '{href}' no longer has one unambiguous current target. "
+        "Use a JSON or CSV mapping with target_href."
+    )
+
+
+def _resolve_mapping_target(
+    directive: MappingTarget,
+    page_targets: tuple[PageTarget, ...],
+) -> PageTarget:
+    if directive.href is not None:
+        return _target_by_href(directive.href, page_targets)
+    if directive.section_id is not None:
+        candidates = [
+            target
+            for target in page_targets
+            if target.section_id.casefold() == directive.section_id.casefold()
+        ]
+        if len(candidates) != 1:
+            raise InvalidInputError(
+                f"Mapping section '{directive.section_id}' does not identify exactly one ADT page."
+            )
+        return candidates[0]
+    assert directive.page is not None
+    if directive.page == 0:
+        return page_targets[0]
+    if directive.page > len(page_targets):
+        raise InvalidInputError(
+            f"Mapping targets page {directive.page}, but the ADT spine has {len(page_targets)} pages."
+        )
+    return page_targets[directive.page - 1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,16 +428,34 @@ def plan_videos(
     page_hrefs: tuple[str, ...],
     recursive: bool = False,
     mapping_file: str | Path | None = None,
+    page_targets: tuple[PageTarget, ...] | None = None,
+    historical_page_hrefs: dict[int, str] | None = None,
+    notes: list[str] | None = None,
 ) -> tuple[PlannedVideo, ...]:
-    """Map MP4 files to ADT spine positions without assuming a page_ prefix."""
+    """Map MP4 files to ADT pages without conflating spine and runtime indices."""
 
     root = Path(videos).expanduser().resolve()
     if not root.is_dir():
         raise InvalidInputError(f"Compressed video directory does not exist: '{root}'.")
     explicit = _mapping_rows(Path(mapping_file).expanduser().resolve()) if mapping_file else None
     candidates = root.rglob("*.mp4") if recursive else root.glob("*.mp4")
+    targets = page_targets or tuple(
+        PageTarget(
+            spine_index=position,
+            href=href,
+            section_id="",
+            declared_video_index=position,
+        )
+        for position, href in enumerate(page_hrefs, start=1)
+    )
+    if len(targets) != len(page_hrefs) or any(
+        target.href != page_hrefs[position]
+        for position, target in enumerate(targets)
+    ):
+        raise InvalidInputError("The supplied ADT page targets do not match the page href list.")
     items: list[PlannedVideo] = []
-    pages: dict[int, str] = {}
+    pages: dict[str, str] = {}
+    video_indices: dict[int, str] = {}
     discovered_names: set[str] = set()
     for path in sorted(candidates, key=lambda item: str(item).casefold()):
         if not path.is_file():
@@ -202,38 +463,53 @@ def plan_videos(
         discovered_names.add(path.name.casefold())
         if explicit is not None:
             try:
-                page = explicit[path.name.casefold()]
+                directive = explicit[path.name.casefold()]
             except KeyError as exc:
                 raise InvalidInputError(f"Page mapping has no entry for video '{path.name}'.") from exc
+            target = _resolve_mapping_target(directive, targets)
         else:
-            groups = NUMBER_GROUP_PATTERN.findall(path.stem)
-            if len(groups) != 1:
-                raise InvalidInputError(
-                    f"Video '{path.name}' must contain exactly one positive page number, or use --mapping."
+            page = _video_number(path)
+            if page == 0:
+                target = targets[0]
+            elif historical_page_hrefs and page in historical_page_hrefs:
+                target = _target_by_href(
+                    historical_page_hrefs[page],
+                    targets,
+                    source_page=page,
+                    notes=notes,
                 )
-            page = int(groups[0])
-            if page < 1:
-                raise InvalidInputError(f"Video '{path.name}' maps to invalid page zero.")
-        if page > len(page_hrefs):
+            elif page <= len(targets):
+                target = targets[page - 1]
+            else:
+                raise InvalidInputError(
+                    f"Video '{path.name}' maps to historical page {page}, but the current ADT spine "
+                    f"has {len(targets)} pages and no matching history was found. Use a JSON or CSV "
+                    "mapping with target_href."
+                )
+        target_key = target.href.casefold()
+        if target_key in pages:
             raise InvalidInputError(
-                f"Video '{path.name}' maps to page {page}, but the ADT spine has {len(page_hrefs)} pages."
+                f"Videos '{pages[target_key]}' and '{path.name}' both map to '{target.href}'."
             )
-        if page in pages:
+        video_index = target.video_index
+        if video_index in video_indices:
             raise InvalidInputError(
-                f"Videos '{pages[page]}' and '{path.name}' both map to ADT page {page}."
+                f"Videos '{video_indices[video_index]}' and '{path.name}' would share runtime key "
+                f"'video-{video_index}'. Give the target pages unique page-section-id values."
             )
         size = path.stat().st_size
         if size <= 0:
             raise InvalidInputError(f"Video is empty: '{path}'.")
-        pages[page] = path.name
+        pages[target_key] = path.name
+        video_indices[video_index] = path.name
         items.append(
             PlannedVideo(
                 source=path.resolve(),
                 source_filename=path.name,
-                page_index=page,
-                page_href=page_hrefs[page - 1],
-                mapping_key=f"video-{page}",
-                destination_filename=f"page_{page}.mp4",
+                page_index=target.spine_index,
+                page_href=target.href,
+                mapping_key=f"video-{video_index}",
+                destination_filename=f"page_{video_index}.mp4",
                 size_bytes=size,
             )
         )
@@ -475,6 +751,7 @@ class AdtPublishPlan:
     language: str
     mode: str
     page_hrefs: tuple[str, ...]
+    page_video_index_updates: dict[str, int]
     videos: tuple[PlannedVideo, ...]
     existing_mappings: dict[str, str]
     active_runtime_files: tuple[str, ...]
@@ -509,6 +786,7 @@ class AdtPublishPlan:
             "mode": self.mode,
             "page_count": len(self.page_hrefs),
             "page_hrefs": list(self.page_hrefs),
+            "page_video_index_updates": dict(self.page_video_index_updates),
             "videos": [item.to_dict() for item in self.videos],
             "existing_mappings": dict(self.existing_mappings),
             "active_runtime_files": list(self.active_runtime_files),
@@ -548,14 +826,40 @@ def analyze_adt_publish(
     required = (root / "index.html", root / "imsmanifest.xml", root / "assets" / "config.json")
     if not root.is_dir() or any(not path.is_file() for path in required):
         raise PublishFailedError(f"The selected folder is not a complete ADT website: '{root}'.")
-    hrefs = _page_hrefs(root)
+    targets = _page_targets(root)
+    hrefs = tuple(target.href for target in targets)
     _config, selected = _select_language(root, language)
+    mapping_notes: list[str] = []
+    historical_hrefs: dict[int, str] = {}
+    historical_commit: str | None = None
+    if mapping_file is None:
+        candidates = video_root.rglob("*.mp4") if recursive else video_root.glob("*.mp4")
+        source_pages = {
+            _video_number(path)
+            for path in candidates
+            if path.is_file()
+        }
+        historical_hrefs, historical_commit = _historical_page_hrefs(
+            root,
+            source_pages,
+            hrefs,
+        )
     planned = plan_videos(
         video_root,
         page_hrefs=hrefs,
         recursive=recursive,
         mapping_file=mapping_file,
+        page_targets=targets,
+        historical_page_hrefs=historical_hrefs,
+        notes=mapping_notes,
     )
+    planned_target_hrefs = {item.page_href.casefold() for item in planned}
+    page_video_index_updates = {
+        target.href: target.video_index
+        for target in targets
+        if target.declared_video_index != target.video_index
+        and target.href.casefold() in planned_target_hrefs
+    }
     mapping_path = root / "content" / "i18n" / selected / "videos.json"
     existing_document = _load_json(mapping_path, f"{selected}/videos.json") if mapping_path.is_file() else {}
     if not isinstance(existing_document, dict) or any(
@@ -564,10 +868,43 @@ def analyze_adt_publish(
     ):
         raise PublishFailedError(f"{selected}/videos.json must contain string mappings.")
     existing = dict(existing_document)
+    desired = {item.mapping_key: item.destination_filename for item in planned}
+    retained_mappings = dict(existing) if mode == "merge" else {}
+    retained_mappings.update(desired)
+    mapping_blockers: list[str] = []
+    retained_video_sources: set[str] = set()
+    for key, filename in retained_mappings.items():
+        match = re.fullmatch(r"video-(0|[1-9][0-9]*)", key)
+        if match is None or int(match.group(1)) > len(hrefs):
+            mapping_blockers.append(f"Existing videos.json contains an invalid key: '{key}'.")
+            continue
+        if PurePosixPath(filename).name != filename or not filename.lower().endswith(".mp4"):
+            mapping_blockers.append(
+                f"Existing videos.json contains an unsafe filename for '{key}'."
+            )
+            continue
+        if key in desired:
+            continue
+        relative = f"content/i18n/{selected}/video/{filename}"
+        retained_video_sources.add(relative)
+        if not (root / Path(*PurePosixPath(relative).parts)).is_file():
+            mapping_blockers.append(f"Existing mapped video is missing: '{filename}'.")
     manifest = _manifest_files(root)
     runtime, helper_locations = _active_assets(root, hrefs)
-    blockers: list[str] = []
-    warnings: list[str] = []
+    blockers: list[str] = list(mapping_blockers)
+    warnings: list[str] = list(mapping_notes)
+    if historical_commit is not None:
+        warnings.insert(
+            0,
+            f"Input numbering matches historical {len(historical_hrefs)}-page ADT spine "
+            f"{historical_commit}; High2Min mapped videos by stable page hrefs to the current "
+            f"{len(hrefs)}-page spine.",
+        )
+    for href, video_index in page_video_index_updates.items():
+        warnings.append(
+            f"Page '{href}' shares an unnumbered cover index; High2Min will assign "
+            f"page-section-id {video_index} so its sign video remains unique."
+        )
     if not runtime:
         blockers.append("No active assets/base.bundle*.js runtime is referenced by the ADT pages.")
     for relative in runtime:
@@ -637,6 +974,7 @@ def analyze_adt_publish(
         *runtime,
         *active_preloaders,
         *offline_resources,
+        *retained_video_sources,
         "assets/config.json",
         "content/pages.json",
         f"content/i18n/{selected}/videos.json",
@@ -678,7 +1016,7 @@ def analyze_adt_publish(
             )
     if manifest_recoveries:
         warnings.append(
-            f"The manifest omits {len(manifest_recoveries)} required active/offline resource(s); "
+            f"The manifest omits {len(manifest_recoveries)} required website resource(s); "
             "High2Min will recover their declarations during publishing."
         )
     if manifest_prunings:
@@ -713,8 +1051,8 @@ def analyze_adt_publish(
         needs_helpers = any(href not in helper_locations[value] for value in APPROVED_HELPERS.values())
         if needs_query_update or needs_helpers:
             mutations.add(href)
+    mutations.update(page_video_index_updates)
 
-    desired = {item.mapping_key: item.destination_filename for item in planned}
     removals: list[str] = []
     for item in planned:
         existing_filename = existing.get(item.mapping_key)
@@ -740,6 +1078,7 @@ def analyze_adt_publish(
         language=selected,
         mode=mode,
         page_hrefs=hrefs,
+        page_video_index_updates=page_video_index_updates,
         videos=planned,
         existing_mappings=existing,
         active_runtime_files=runtime,

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.6 - 2026-09-07
+
+- Accept `Page-0.mp4` as a front-cover video and keep its runtime mapping as `video-0` / `page_0.mp4`.
+- Assign a unique runtime page index to a targeted back cover that still shares the unnumbered cover metadata.
+- Recover historical Git-tracked page spines so source video numbering remains stable after ADT pages are joined or removed.
+- Allow JSON/CSV mapping targets by current page number, exact HTML href, or section ID.
+- Keep cover sign-language controls available and preserve unrelated legacy source-segment MP4 files during merge publishing.
+- Retry one transient empty headless-browser result so native release checks do not fail on a cold browser launch.
+- Add regression coverage for cover mappings, page-index updates, stable targets, and legacy extra videos.
+
 ## 0.11.5 - 2026-09-07
 
 - Support split offline readers where `assets/offline-preloader.js` loads the `INLINE` resource map from a local file such as `assets/offline-data.js`.

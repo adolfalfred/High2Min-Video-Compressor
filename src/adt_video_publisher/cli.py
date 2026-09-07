@@ -218,7 +218,10 @@ def _build_parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--recursive", action="store_true", help="Find page videos in nested folders.")
     publish_parser.add_argument("--maximum-bytes", type=int, default=DEFAULT_MAXIMUM_BYTES)
     publish_parser.add_argument("--probe", help="Explicit FFprobe or FFmpeg executable path.")
-    publish_parser.add_argument("--mapping", help="Optional JSON or CSV source-to-ADT-page mapping.")
+    publish_parser.add_argument(
+        "--mapping",
+        help="Optional JSON or CSV source-to-ADT-target mapping.",
+    )
     publish_parser.add_argument(
         "--mode", choices=("merge", "replace"), default="merge",
         help="Merge with existing mappings or replace them (default: merge).",
@@ -235,7 +238,10 @@ def _build_parser() -> argparse.ArgumentParser:
     publish_plan_parser.add_argument("--book", required=True, help="ADT website directory to analyze.")
     publish_plan_parser.add_argument("--language", help="ADT language code; defaults to config.json.")
     publish_plan_parser.add_argument("--recursive", action="store_true", help="Find MP4 files in nested folders.")
-    publish_plan_parser.add_argument("--mapping", help="Optional JSON or CSV source-to-ADT-page mapping.")
+    publish_plan_parser.add_argument(
+        "--mapping",
+        help="Optional JSON or CSV source-to-ADT-target mapping.",
+    )
     publish_plan_parser.add_argument(
         "--mode", choices=("merge", "replace"), default="merge",
         help="Preview safe merging or authoritative replacement (default: merge).",

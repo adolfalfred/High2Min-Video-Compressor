@@ -230,33 +230,45 @@ def run_browser_contract_tests(
             (root / name).write_bytes(files("adt_video_publisher").joinpath("assets", name).read_bytes())
         url = (root / "index.html").resolve().as_uri()
         for width, height in viewports:
-            profile = root / f"profile-{width}"
-            command = [
-                str(browser),
-                "--headless=new",
-                "--disable-gpu",
-                "--disable-extensions",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--allow-file-access-from-files",
-                "--autoplay-policy=no-user-gesture-required",
-                f"--user-data-dir={profile}",
-                f"--window-size={width},{height}",
-                "--virtual-time-budget=3000",
-                "--dump-dom",
-                url,
-            ]
-            if sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0:
-                command.insert(1, "--no-sandbox")
-            try:
-                completed = _run_browser_command(command)
-            except (OSError, subprocess.SubprocessError) as exc:
-                raise PublishFailedError(f"Headless browser validation could not run: {exc}") from exc
-            match = re.search(
-                r'data-high2min-browser-result="(?P<value>\{.*?\})"',
-                completed.stdout,
-                re.DOTALL,
-            )
+            completed: subprocess.CompletedProcess[str] | None = None
+            match: re.Match[str] | None = None
+            for attempt in range(2):
+                profile = root / f"profile-{width}-{attempt + 1}"
+                command = [
+                    str(browser),
+                    "--headless=new",
+                    "--disable-gpu",
+                    "--disable-extensions",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--allow-file-access-from-files",
+                    "--autoplay-policy=no-user-gesture-required",
+                    f"--user-data-dir={profile}",
+                    f"--window-size={width},{height}",
+                    "--virtual-time-budget=3000",
+                    "--dump-dom",
+                    url,
+                ]
+                if sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0:
+                    command.insert(1, "--no-sandbox")
+                try:
+                    completed = _run_browser_command(command)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    raise PublishFailedError(
+                        f"Headless browser validation could not run: {exc}"
+                    ) from exc
+                match = re.search(
+                    r'data-high2min-browser-result="(?P<value>\{.*?\})"',
+                    completed.stdout,
+                    re.DOTALL,
+                )
+                error_match = re.search(
+                    r'data-high2min-browser-error="(?P<value>[^"]+)"',
+                    completed.stdout,
+                )
+                if match is not None or error_match is not None or attempt == 1:
+                    break
+            assert completed is not None
             if completed.returncode != 0 or match is None:
                 error_match = re.search(r'data-high2min-browser-error="(?P<value>[^"]+)"', completed.stdout)
                 if error_match:

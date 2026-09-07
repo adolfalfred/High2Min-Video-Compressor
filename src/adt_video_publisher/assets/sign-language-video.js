@@ -85,8 +85,18 @@
     keepPlayerOnScreen(player);
   }
 
+  function revealAuthoredCoverControls() {
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-cover-hidden-sign-language]"),
+      function (element) {
+        element.removeAttribute("data-cover-hidden-sign-language");
+      }
+    );
+  }
+
   function install() {
     scheduled = false;
+    revealAuthoredCoverControls();
     Array.prototype.forEach.call(document.querySelectorAll(VIDEO_SELECTOR), function (video) {
       var player = video.parentElement;
       if (!player || window.getComputedStyle(player).position !== "fixed") return;
@@ -102,7 +112,12 @@
     window.requestAnimationFrame(install);
   }
 
-  new MutationObserver(scheduleInstall).observe(document.documentElement, { childList: true, subtree: true });
+  new MutationObserver(scheduleInstall).observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["data-cover-hidden-sign-language"]
+  });
   window.addEventListener("resize", scheduleInstall);
   window.addEventListener("orientationchange", scheduleInstall);
   if (window.visualViewport) window.visualViewport.addEventListener("resize", scheduleInstall);

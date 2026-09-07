@@ -298,6 +298,9 @@ class PublishingTests(unittest.TestCase):
             book = make_book(root, existing_video=True)
             marker = book / "content" / "i18n" / "en-GB" / "video" / "notes.txt"
             marker.write_text("preserve me", encoding="utf-8")
+            legacy_extra = marker.with_name("unmapped-source-segment.mp4")
+            legacy_extra.write_bytes(b"preserve this legacy source segment")
+            write_manifest(book)
             videos = root / "compressed"
             videos.mkdir()
             (videos / "lesson 1.mp4").write_bytes(b"replacement")
@@ -307,6 +310,66 @@ class PublishingTests(unittest.TestCase):
             mappings = json.loads((book / "content" / "i18n" / "en-GB" / "videos.json").read_text())
             self.assertEqual(mappings, {"video-1": "page_1.mp4", "video-2": "page_2.mp4"})
             self.assertEqual(marker.read_text(encoding="utf-8"), "preserve me")
+            self.assertEqual(
+                legacy_extra.read_bytes(),
+                b"preserve this legacy source segment",
+            )
+
+    def test_publish_supports_front_and_unnumbered_back_cover_videos(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            page_indices = {
+                "index.html": 0,
+                "pg002.html": 1,
+                "pg003.html": 0,
+            }
+            for href, page_index in page_indices.items():
+                page = book / href
+                cover_marker = (
+                    ' data-cover-hidden-sign-language="true"'
+                    if page_index == 0
+                    else ""
+                )
+                page.write_text(
+                    f'<meta name="page-section-id" content="{page_index}">'
+                    f'<button{cover_marker}>Sign language</button>'
+                    + page.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "Page-0.mp4").write_bytes(b"front cover")
+            (videos / "Page-3.mp4").write_bytes(b"back cover")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            language = book / "content" / "i18n" / "en-GB"
+            mappings = json.loads(
+                (language / "videos.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                mappings,
+                {"video-0": "page_0.mp4", "video-3": "page_3.mp4"},
+            )
+            self.assertEqual(
+                (language / "video" / "page_0.mp4").read_bytes(),
+                b"front cover",
+            )
+            self.assertEqual(
+                (language / "video" / "page_3.mp4").read_bytes(),
+                b"back cover",
+            )
+            back_source = (book / "pg003.html").read_text(encoding="utf-8")
+            self.assertIn('name="page-section-id" content="3"', back_source)
+            helper = (book / "assets" / "sign-language-video.js").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                'removeAttribute("data-cover-hidden-sign-language")',
+                helper,
+            )
 
     def test_merge_mode_preserves_untouched_legacy_video_filenames(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -404,6 +467,34 @@ class PublishingTests(unittest.TestCase):
             self.assertEqual(
                 validate_adt_website(output, allow_unmanifested=True)["video_count"],
                 1,
+            )
+
+    def test_copy_publish_recovers_retained_video_omitted_from_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root, existing_video=True)
+            retained_relative = "content/i18n/en-GB/video/page_2.mp4"
+            omit_manifest_files(book, {retained_relative})
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            output = root / "published"
+
+            publish_adt(
+                videos,
+                book=book,
+                output=output,
+                in_place=False,
+                validate_media=False,
+            )
+
+            self.assertEqual(
+                (output / retained_relative).read_bytes(),
+                b"old-video",
+            )
+            self.assertIn(
+                retained_relative,
+                declared_manifest_files(output / "imsmanifest.xml"),
             )
 
     def test_replace_mode_requires_explicit_confirmation_for_removals(self) -> None:
@@ -781,7 +872,7 @@ class PublishingTests(unittest.TestCase):
                 "removed-legacy-page.html",
                 declared_manifest_files(book / "imsmanifest.xml"),
             )
-            for relative in {"pg002.html", "pg003.html"}:
+            for relative in ("pg002.html", "pg003.html"):
                 source = (book / relative).read_text(encoding="utf-8")
                 self.assertIn("media-playback-independence.js", source)
                 self.assertIn("sign-language-video.js", source)

@@ -12,7 +12,7 @@ Maintainers can follow the [certificate-free release checklist](docs/release-che
 
 The 0.11.x publishing design is documented in [Safe ADT publishing compatibility](docs/v0.11.0-implementation-plan.md).
 
-Version 0.11.5 is the current release line and retains the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages. FFmpeg, FFprobe, and Git inspection remain hidden during Windows desktop jobs, so compression and ADT analysis do not flash console windows. Merge publishing also preserves untouched ADT videos that use legacy filenames while safely replacing selected pages with canonical `page_N.mp4` files. Offline publishing supports both embedded `INLINE` maps and split preloaders that load the map from a local file such as `assets/offline-data.js`.
+Version 0.11.6 is the current release line and retains the proven compact workflow for ADT websites: H.264 CRF 35 with the `medium` preset, complete audio removal, preserved frame rate and aspect ratio, and a hard 5 MiB maximum. Full resolution is kept whenever it fits; only longer outputs are proportionately downscaled from the untouched original until they fit. Every final output must also pass the default 0.95 SSIM floor at its delivered resolution. The desktop UI accepts a video or folder by native drag-and-drop and shows live encoding, validation, and overall percentages. FFmpeg, FFprobe, and Git inspection remain hidden during Windows desktop jobs, so compression and ADT analysis do not flash console windows. Merge publishing preserves untouched legacy video files, accepts `Page-0.mp4` for a front cover, and resolves source numbering from an earlier Git-tracked spine after website pages have been joined. Offline publishing supports both embedded `INLINE` maps and split preloaders that load the map from a local file such as `assets/offline-data.js`.
 
 The desktop app checks the latest public GitHub release in the background at startup, at most once every 24 hours after a successful check. When a newer stable version exists, it asks before opening the verified GitHub release page; it never silently replaces its own files. Offline automatic checks stay silent, and **Check for updates** provides an immediate manual check.
 
@@ -42,7 +42,7 @@ python -m adt_video_publisher resume --job "D:\videos-compressed\.adt-video-job.
 python -m adt_video_publisher verify --input "D:\videos-compressed" --json
 ```
 
-Preview an ADT update without changing any file. Each MP4 filename may contain any words, but its stem must contain exactly one positive number; that number is the ADT spine position. Use `--mapping pages.json` or `--mapping pages.csv` when source/PDF numbering differs from the website spine:
+Preview an ADT update without changing any file. Each MP4 filename may contain any words, but its stem must contain exactly one non-negative number. Zero targets the first page/front cover. Positive source numbers normally identify ADT spine positions; when joined pages have shortened a Git-tracked book, High2Min recovers the matching historical spine and follows its stable HTML href to the current page. Use `--mapping pages.json` or `--mapping pages.csv` to target a current page explicitly by position, `target_href`, or `target_section_id`:
 
 ```powershell
 python -m adt_video_publisher publish-plan `
@@ -64,6 +64,17 @@ python -m adt_video_publisher publish `
 ```
 
 The desktop Publish ADT step always uses this in-place mode and offers a read-only **Analyze ADT changes** preview first. Merge mode preserves existing page videos. Replace mode lists removals and requires explicit confirmation. The preview identifies active pages and offline reader resources omitted from legacy manifests, plus stale declarations for files that no longer exist. Publishing safely repairs those declarations, stages only allowlisted files, verifies baseline hashes immediately before commit, and aborts if another process changes a target. It never rewrites `base.bundle` files, authored CSS, inactive page variants, or quiz pages. Existing approved helpers are preserved; missing media-independence and draggable sign-player adapters are installed in a validated order. A durable journal, same-filesystem file renames, final semantic validation, rollback, and automatic recovery protect the repository. Repository/development files and existing ZIP packages remain byte-identical.
+
+Cover pages that share `page-section-id="0"` are normalized only when a video targets them: the front cover retains runtime key `video-0`, while a later back cover receives a unique key matching its current spine position. Cover-authored sign-control hiding markers are removed by the compatibility helper so a published cover video can be opened normally. Joined-page recovery is reported as a warning because the replacement clip should cover the complete combined page.
+
+Example stable-target JSON mapping:
+
+```json
+{
+  "Page-0.mp4": {"target_href": "index.html"},
+  "back-cover.mp4": {"target_href": "back_cover.html"}
+}
+```
 
 Insufficient-storage errors report required and available capacity in MB. If every compression item fails before any output is produced, High2Min removes the temporary job state and report files so the failed job does not block a clean retry.
 

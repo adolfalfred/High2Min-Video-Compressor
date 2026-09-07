@@ -41,6 +41,7 @@ from .errors import (
     ValidationFailedError,
 )
 from .media import probe_media
+from .page_identity import replace_page_section_index
 from .planning import DEFAULT_MAXIMUM_BYTES
 from .resources import format_megabytes
 
@@ -312,6 +313,25 @@ def _write_json_preserving_style(path: Path, value: object) -> None:
     if trailing_newline:
         updated += "\n"
     path.write_bytes(document.encode(updated))
+
+
+def _apply_page_video_index_updates(book: Path, updates: dict[str, int]) -> tuple[Path, ...]:
+    changed: list[Path] = []
+    for href, video_index in updates.items():
+        relative = Path(*PurePosixPath(href).parts)
+        path = book / relative
+        document = TextDocument.read(path)
+        try:
+            updated = replace_page_section_index(document.text, video_index)
+        except ValueError as exc:
+            raise PublishFailedError(
+                f"Page '{href}' cannot receive unique sign-video index {video_index}: {exc}"
+            ) from exc
+        encoded = document.encode(updated)
+        if encoded != path.read_bytes():
+            path.write_bytes(encoded)
+            changed.append(relative)
+    return tuple(changed)
 
 
 def _page_count(book: Path) -> int:
@@ -746,7 +766,7 @@ def _validate_staged_in_place(
     video_root = videos_path.parent / "video"
     expected_files: set[str] = set()
     for key, filename in mappings.items():
-        match = re.fullmatch(r"video-([1-9][0-9]*)", str(key))
+        match = re.fullmatch(r"video-(0|[1-9][0-9]*)", str(key))
         if not match or int(match.group(1)) > page_count:
             raise PublishFailedError(f"Staged videos.json contains an invalid key: '{key}'.")
         if not isinstance(filename, str) or PurePosixPath(filename).name != filename:
@@ -774,7 +794,10 @@ def _validate_staged_in_place(
             for path in source_video_root.glob("*.mp4")
             if path.is_file() and path.name.casefold() not in removed_files
         )
-    if actual_files != expected_files:
+    if (
+        not expected_files.issubset(actual_files)
+        or (mode != "merge" and actual_files != expected_files)
+    ):
         raise PublishFailedError("The staged video directory and videos.json do not match exactly.")
     declared = declared_manifest_files(stage / "imsmanifest.xml")
     missing = [relative for relative in declared if not _overlay_file(source, stage, relative).is_file()]
@@ -812,11 +835,17 @@ def _copy_manifest_site(
     offline_resource_files: tuple[str, ...],
     active_offline_preloaders: tuple[str, ...],
     active_runtime_files: tuple[str, ...],
+    manifest_recoveries: tuple[str, ...],
 ) -> None:
     declared = declared_manifest_files(source / "imsmanifest.xml")
     required = list(declared)
     seen = {relative.casefold() for relative in required}
-    for relative in (*page_hrefs, *offline_resource_files, *active_offline_preloaders):
+    for relative in (
+        *page_hrefs,
+        *offline_resource_files,
+        *active_offline_preloaders,
+        *manifest_recoveries,
+    ):
         if relative.casefold() not in seen:
             required.append(relative)
             seen.add(relative.casefold())
@@ -1107,7 +1136,7 @@ def validate_adt_website(
     video_root = videos_path.parent / "video"
     mapped_files: set[str] = set()
     for key, filename in mappings.items():
-        match = re.fullmatch(r"video-([1-9][0-9]*)", str(key))
+        match = re.fullmatch(r"video-(0|[1-9][0-9]*)", str(key))
         if not match or int(match.group(1)) > page_count:
             raise PublishFailedError(f"videos.json contains an invalid key: '{key}'.")
         if not isinstance(filename, str) or PurePosixPath(filename).name != filename:
@@ -1120,7 +1149,10 @@ def validate_adt_website(
     actual_videos = {
         path.name.casefold() for path in video_root.glob("*.mp4") if path.is_file()
     } if video_root.is_dir() else set()
-    if actual_videos != mapped_files:
+    if (
+        not mapped_files.issubset(actual_videos)
+        or (not allow_unmanifested and actual_videos != mapped_files)
+    ):
         raise PublishFailedError("The published video directory and videos.json do not match exactly.")
     declared = declared_manifest_files(root / "imsmanifest.xml")
     missing = sorted(
@@ -1547,12 +1579,17 @@ def publish_adt(
             raise UnsafePathError(
                 "The compressed-video input must be separate from the ADT video directory being replaced."
             )
-    items = discover_page_videos(
-        video_root,
-        page_count=page_count,
-        recursive=recursive,
-        page_hrefs=publication_plan.page_hrefs,
-        mapping_file=mapping_file,
+    items = tuple(
+        PageVideo(
+            source=item.source,
+            page_index=item.page_index,
+            key=item.mapping_key,
+            filename=item.destination_filename,
+            size_bytes=item.size_bytes,
+            source_filename=item.source_filename,
+            page_href=item.page_href,
+        )
+        for item in publication_plan.videos
     )
     planned_relatives = tuple(
         Path(*PurePosixPath(relative).parts)
@@ -1669,6 +1706,7 @@ def publish_adt(
                 offline_resource_files=publication_plan.offline_resource_files,
                 active_offline_preloaders=publication_plan.active_offline_preloaders,
                 active_runtime_files=publication_plan.active_runtime_files,
+                manifest_recoveries=publication_plan.manifest_recoveries,
             )
         for relative_text in publication_plan.removals:
             staged_removal = stage / Path(*PurePosixPath(relative_text).parts)
@@ -1733,6 +1771,10 @@ def publish_adt(
         features["readAloud"] = True
         bundle_version = _advance_cache_version(staged_config)
         _write_json_preserving_style(staged_config_path, staged_config)
+        page_index_relatives = _apply_page_video_index_updates(
+            stage,
+            publication_plan.page_video_index_updates,
+        )
         reporter.phase("runtime", 69, "Installing accessibility compatibility adapters")
         adapter_relatives = install_accessibility_adapters(
             stage,
@@ -1825,6 +1867,7 @@ def publish_adt(
                     Path("assets") / "config.json",
                     Path("content") / "i18n" / selected_language / "videos.json",
                     *(Path("content") / "i18n" / selected_language / "video" / item.filename for item in items),
+                    *page_index_relatives,
                     *adapter_relatives,
                     *offline_relatives,
                     Path("imsmanifest.xml"),

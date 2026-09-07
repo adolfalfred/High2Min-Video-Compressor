@@ -49,6 +49,33 @@ class BrowserValidationTests(unittest.TestCase):
                 timeout=0.2,
             )
 
+    def test_browser_contract_retries_one_transient_empty_dump(self) -> None:
+        empty = subprocess.CompletedProcess(["browser"], 0, stdout="", stderr="")
+        passed = subprocess.CompletedProcess(
+            ["browser"],
+            0,
+            stdout=(
+                '<body data-high2min-browser-result="'
+                '{&quot;handControlVisible&quot;:true}'
+                '"></body>'
+            ),
+            stderr="",
+        )
+        with (
+            mock.patch(
+                "adt_video_publisher.browser_validation.find_chromium",
+                return_value="browser",
+            ),
+            mock.patch(
+                "adt_video_publisher.browser_validation._run_browser_command",
+                side_effect=(empty, passed),
+            ) as run,
+        ):
+            result = run_browser_contract_tests(viewports=((320, 640),))
+
+        self.assertTrue(result.passed)
+        self.assertEqual(run.call_count, 2)
+
     @unittest.skipUnless(
         _run_real_browser_in_this_job(),
         "The real browser contract runs once on Windows CI, or locally when Chromium is installed",
