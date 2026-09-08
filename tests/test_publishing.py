@@ -315,6 +315,57 @@ class PublishingTests(unittest.TestCase):
                 b"preserve this legacy source segment",
             )
 
+    def test_merge_supports_cache_busted_video_references(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root, existing_video=True)
+            language = book / "content" / "i18n" / "en-GB"
+            (language / "videos.json").write_text(
+                json.dumps(
+                    {
+                        "video-2": "page_2.mp4?v=17",
+                        "video-3": "page_3.mp4?v=17",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (language / "video" / "page_3.mp4").write_bytes(b"untouched")
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            (videos / "page_2.mp4").write_bytes(b"replacement-two")
+
+            plan = publishing.analyze_adt_publish(videos, book=book)
+            self.assertTrue(plan.ready, plan.blockers)
+
+            result = publish_adt(
+                videos,
+                book=book,
+                in_place=True,
+                validate_media=False,
+            )
+
+            self.assertEqual(result.bundle_version, "8")
+            mappings = json.loads((language / "videos.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                mappings,
+                {
+                    "video-1": "page_1.mp4?v=8",
+                    "video-2": "page_2.mp4?v=8",
+                    "video-3": "page_3.mp4?v=17",
+                },
+            )
+            declared = declared_manifest_files(book / "imsmanifest.xml")
+            self.assertIn("content/i18n/en-GB/video/page_1.mp4", declared)
+            self.assertIn("content/i18n/en-GB/video/page_2.mp4", declared)
+            self.assertIn("content/i18n/en-GB/video/page_3.mp4", declared)
+            self.assertFalse(any("?v=" in relative for relative in declared))
+            self.assertEqual(
+                validate_adt_website(book, allow_unmanifested=True)["video_count"],
+                3,
+            )
+
     def test_publish_supports_front_and_unnumbered_back_cover_videos(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

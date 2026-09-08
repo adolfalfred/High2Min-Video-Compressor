@@ -44,6 +44,7 @@ from .media import probe_media
 from .page_identity import replace_page_section_index
 from .planning import DEFAULT_MAXIMUM_BYTES
 from .resources import format_megabytes
+from .video_references import parse_video_reference, versioned_video_reference
 
 ProgressCallback = Callable[[str, str, dict[str, object]], None]
 IMS_NAMESPACE: Final = "http://www.imsproject.org/xsd/imscp_rootv1p1p2"
@@ -696,10 +697,15 @@ def _update_in_place_manifest(
         for key, value in mappings.items()
     ):
         raise PublishFailedError("Staged videos.json must contain string mappings.")
-    mapped_video_files = {
-        f"content/i18n/{language}/video/{filename}"
-        for filename in mappings.values()
-    }
+    mapped_video_files: set[str] = set()
+    for key, reference in mappings.items():
+        try:
+            filename = parse_video_reference(reference).filename
+        except ValueError as exc:
+            raise PublishFailedError(
+                f"Staged videos.json contains an unsafe filename for '{key}'."
+            ) from exc
+        mapped_video_files.add(f"content/i18n/{language}/video/{filename}")
     mapped_video_keys = {relative.casefold() for relative in mapped_video_files}
     files = {
         relative
@@ -765,12 +771,16 @@ def _validate_staged_in_place(
         raise PublishFailedError("Staged videos.json must contain an object.")
     video_root = videos_path.parent / "video"
     expected_files: set[str] = set()
-    for key, filename in mappings.items():
+    for key, reference in mappings.items():
         match = re.fullmatch(r"video-(0|[1-9][0-9]*)", str(key))
         if not match or int(match.group(1)) > page_count:
             raise PublishFailedError(f"Staged videos.json contains an invalid key: '{key}'.")
-        if not isinstance(filename, str) or PurePosixPath(filename).name != filename:
-            raise PublishFailedError(f"Staged videos.json contains an unsafe filename for '{key}'.")
+        try:
+            filename = parse_video_reference(reference).filename
+        except ValueError as exc:
+            raise PublishFailedError(
+                f"Staged videos.json contains an unsafe filename for '{key}'."
+            ) from exc
         staged_video = video_root / filename
         source_video = source / "content" / "i18n" / language / "video" / filename
         exists = staged_video.is_file() or (mode == "merge" and source_video.is_file())
@@ -1135,12 +1145,16 @@ def validate_adt_website(
         raise PublishFailedError("videos.json must contain an object.")
     video_root = videos_path.parent / "video"
     mapped_files: set[str] = set()
-    for key, filename in mappings.items():
+    for key, reference in mappings.items():
         match = re.fullmatch(r"video-(0|[1-9][0-9]*)", str(key))
         if not match or int(match.group(1)) > page_count:
             raise PublishFailedError(f"videos.json contains an invalid key: '{key}'.")
-        if not isinstance(filename, str) or PurePosixPath(filename).name != filename:
-            raise PublishFailedError(f"videos.json contains an unsafe filename for '{key}'.")
+        try:
+            filename = parse_video_reference(reference).filename
+        except ValueError as exc:
+            raise PublishFailedError(
+                f"videos.json contains an unsafe filename for '{key}'."
+            ) from exc
         if filename.casefold() in mapped_files:
             raise PublishFailedError(f"videos.json maps a file more than once: '{filename}'.")
         mapped_files.add(filename.casefold())
@@ -1739,7 +1753,6 @@ def publish_adt(
                     sha256=digest,
                 )
             )
-            mappings[item.key] = item.filename
             if progress_callback:
                 progress_callback(
                     job_id,
@@ -1755,11 +1768,6 @@ def publish_adt(
 
         reporter.check_cancelled()
         reporter.phase("metadata", 64, "Updating ADT video mappings and configuration")
-        staged_mappings_path = stage / "content" / "i18n" / selected_language / "videos.json"
-        if staged_mappings_path.is_file():
-            _write_json_preserving_style(staged_mappings_path, mappings)
-        else:
-            _write_json(staged_mappings_path, mappings)
         staged_config_path = stage / "assets" / "config.json"
         staged_config = _read_json(staged_config_path, "assets/config.json")
         if not isinstance(staged_config, dict):
@@ -1770,6 +1778,26 @@ def publish_adt(
         features["signLanguage"] = True
         features["readAloud"] = True
         bundle_version = _advance_cache_version(staged_config)
+        inherit_video_cache_version = False
+        for reference in publication_plan.existing_mappings.values():
+            try:
+                if parse_video_reference(reference).has_cache_version:
+                    inherit_video_cache_version = True
+                    break
+            except ValueError:
+                continue
+        for item in items:
+            mappings[item.key] = versioned_video_reference(
+                item.filename,
+                cache_version=bundle_version,
+                existing_reference=publication_plan.existing_mappings.get(item.key),
+                inherit_cache_version=inherit_video_cache_version,
+            )
+        staged_mappings_path = stage / "content" / "i18n" / selected_language / "videos.json"
+        if staged_mappings_path.is_file():
+            _write_json_preserving_style(staged_mappings_path, mappings)
+        else:
+            _write_json(staged_mappings_path, mappings)
         _write_json_preserving_style(staged_config_path, staged_config)
         page_index_relatives = _apply_page_video_index_updates(
             stage,

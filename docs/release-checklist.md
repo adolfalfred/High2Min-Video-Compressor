@@ -18,8 +18,8 @@
 ## Build a draft release
 
 ```sh
-git tag -a v0.11.6 -m "High2Min Video Compressor 0.11.6"
-git push origin v0.11.6
+git tag -a v0.11.7 -m "High2Min Video Compressor 0.11.7"
+git push origin v0.11.7
 ```
 
 - [ ] Open **Actions → Build release** and wait for all native build jobs and the draft-release job to succeed.
@@ -27,8 +27,8 @@ git push origin v0.11.6
 - [ ] Confirm it contains four archives, four `.sha256` sidecars, `SHA256SUMS.txt`, and a release index.
 - [ ] Download at least the Windows archive and verify its checksum and provenance.
 - [ ] Confirm the Windows application opens and performs a small compression test.
-- [ ] Confirm `High2Min Video Compressor.exe` opens without a terminal and `high2min.exe --version` prints `0.11.6` in PowerShell.
-- [ ] Confirm the automatic startup check and manual update action report that published `0.11.6` is current.
+- [ ] Confirm `High2Min Video Compressor.exe` opens without a terminal and `high2min.exe --version` prints `0.11.7` in PowerShell.
+- [ ] Confirm the automatic startup check and manual update action report that published `0.11.7` is current.
 - [ ] Confirm compression shows no FFmpeg/FFprobe console popups on Windows.
 - [ ] Confirm desktop Publish ADT updates the chosen repo itself and leaves existing ZIP files unchanged.
 - [ ] Confirm **Analyze ADT changes** performs no writes and displays source names, ADT spine pages, destination names, mutations, and removals.
@@ -36,6 +36,7 @@ git push origin v0.11.6
 - [ ] Confirm the preview reports active/offline resources omitted from the manifest and stale declarations, then publishing repairs both safely.
 - [ ] Confirm merge preserves existing page videos and replace refuses removals until they are explicitly confirmed.
 - [ ] Confirm merge preserves untouched legacy filenames such as `sl_pg001_sec001.mp4` while replacing only selected pages and removing their superseded legacy files.
+- [ ] Confirm merge accepts cache-busted mappings such as `page_1.mp4?v=17`, checks the physical `page_1.mp4`, and advances the replaced mapping's cache version.
 - [ ] Confirm `Page-0.mp4` publishes to a front cover, a later unnumbered back cover receives a unique runtime key, and its hand-sign control opens normally.
 - [ ] Confirm historical source numbering follows stable page hrefs after page joins and reports an actionable joined-page warning.
 - [ ] Confirm flexible names with one numeric group and JSON/CSV page, href, or section-ID overrides publish to the intended ADT pages.

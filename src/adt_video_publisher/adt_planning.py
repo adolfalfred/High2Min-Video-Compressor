@@ -17,6 +17,7 @@ from typing import Final
 from .errors import InvalidInputError, PublishFailedError
 from .page_identity import page_section_index
 from .processes import hidden_process_options
+from .video_references import parse_video_reference
 
 IMS_NAMESPACE: Final = "http://www.imsproject.org/xsd/imscp_rootv1p1p2"
 NUMBER_GROUP_PATTERN: Final = re.compile(r"[0-9]+")
@@ -873,12 +874,20 @@ def analyze_adt_publish(
     retained_mappings.update(desired)
     mapping_blockers: list[str] = []
     retained_video_sources: set[str] = set()
-    for key, filename in retained_mappings.items():
+    parsed_existing_filenames: dict[str, str] = {}
+    for key, reference in existing.items():
+        try:
+            parsed_existing_filenames[key] = parse_video_reference(reference).filename
+        except ValueError:
+            pass
+    for key, reference in retained_mappings.items():
         match = re.fullmatch(r"video-(0|[1-9][0-9]*)", key)
         if match is None or int(match.group(1)) > len(hrefs):
             mapping_blockers.append(f"Existing videos.json contains an invalid key: '{key}'.")
             continue
-        if PurePosixPath(filename).name != filename or not filename.lower().endswith(".mp4"):
+        try:
+            filename = parse_video_reference(reference).filename
+        except ValueError:
             mapping_blockers.append(
                 f"Existing videos.json contains an unsafe filename for '{key}'."
             )
@@ -1055,15 +1064,16 @@ def analyze_adt_publish(
 
     removals: list[str] = []
     for item in planned:
-        existing_filename = existing.get(item.mapping_key)
+        existing_filename = parsed_existing_filenames.get(item.mapping_key)
         if (
             existing_filename is not None
             and existing_filename.casefold() != item.destination_filename.casefold()
         ):
             removals.append(f"content/i18n/{selected}/video/{existing_filename}")
     if mode == "replace":
-        for key, filename in existing.items():
-            if key not in desired:
+        for key in existing:
+            filename = parsed_existing_filenames.get(key)
+            if key not in desired and filename is not None:
                 removals.append(f"content/i18n/{selected}/video/{filename}")
     for item in planned:
         mutations.add(f"content/i18n/{selected}/video/{item.destination_filename}")

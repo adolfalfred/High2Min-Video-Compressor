@@ -201,6 +201,27 @@ class AdtPlanningTests(unittest.TestCase):
             self.assertIn("assets/media-playback-independence.js", plan.mutations)
             self.assertIn("index.html", plan.mutations)
 
+    def test_analyzer_accepts_cache_busted_existing_video_references(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_profile(root)
+            language = book / "content" / "i18n" / "sw-TZ"
+            (language / "videos.json").write_text(
+                json.dumps({"video-3": "page_3.mp4?v=17"}),
+                encoding="utf-8",
+            )
+            videos = root / "videos"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            before = tree_hash(book)
+
+            plan = analyze_adt_publish(videos, book=book)
+
+            self.assertEqual(tree_hash(book), before)
+            self.assertTrue(plan.ready, plan.blockers)
+            self.assertEqual(plan.existing_mappings, {"video-3": "page_3.mp4?v=17"})
+            self.assertFalse(any("?" in relative for relative in plan.removals))
+
     def test_analyzer_assigns_unique_runtime_index_to_unnumbered_back_cover(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.7 - 2026-09-08
+
+- Accept local MP4 mappings with cache-busting query strings or fragments, such as `page_1.mp4?v=17`, while resolving filesystem operations to the physical `page_1.mp4` file.
+- Preserve untouched browser-facing mappings and advance the cache version on newly added or replaced videos when the ADT already follows the `?v=` convention.
+- Keep URL queries and fragments out of manifest declarations, removal paths, staged copies, rollback paths, and final file validation.
+- Continue rejecting external URLs, absolute paths, subdirectories, encoded traversal, malformed percent escapes, and non-MP4 mappings.
+- Add parser, read-only preview, and transactional publishing regression coverage modeled on the Arts & Sports Standard 3 repository.
+
 ## 0.11.6 - 2026-09-07
 
 - Accept `Page-0.mp4` as a front-cover video and keep its runtime mapping as `video-0` / `page_0.mp4`.
