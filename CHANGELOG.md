@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.8 - 2026-09-08
+
+- Synchronize legacy `CURRENT_CONFIG` and `CURRENT_VIDEOS` preloader fallbacks with the refreshed configuration and sign-video mappings.
+- Preserve authored preloader behavior while updating only generated `INLINE` and recognized runtime fallback objects.
+- Reject a staged publication before repository changes if a recognized runtime fallback remains stale.
+- Add regression coverage modeled on the English Standard 3 repository where replaced sign videos existed but stale fallback filenames kept them disconnected.
+
 ## 0.11.7 - 2026-09-08
 
 - Accept local MP4 mappings with cache-busting query strings or fragments, such as `page_1.mp4?v=17`, while resolving filesystem operations to the physical `page_1.mp4` file.

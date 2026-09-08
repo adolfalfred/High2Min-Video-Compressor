@@ -144,6 +144,76 @@ def _inline_json_span(source: str) -> tuple[int, int]:
     raise PublishFailedError("Offline preloader INLINE map is incomplete.")
 
 
+def _optional_json_object_span(source: str, variable: str) -> tuple[int, int] | None:
+    """Return the JSON object assigned to an optional JavaScript variable."""
+
+    assignment = re.search(
+        rf"\b(?:var|let|const)\s+{re.escape(variable)}\s*=\s*",
+        source,
+    )
+    if assignment is None:
+        return None
+    start = assignment.end()
+    while start < len(source) and source[start].isspace():
+        start += 1
+    if start >= len(source) or source[start] != "{":
+        return None
+    depth = 0
+    quoted = False
+    escaped = False
+    for position in range(start, len(source)):
+        character = source[position]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+            continue
+        if character == '"':
+            quoted = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return start, position + 1
+            if depth < 0:
+                break
+    return None
+
+
+def _normalized_preloader_wrapper(source: str) -> str:
+    """Mask generated resource objects before comparing authored wrapper code."""
+
+    spans = [("INLINE", *_inline_json_span(source))]
+    for variable in ("CURRENT_CONFIG", "CURRENT_VIDEOS"):
+        span = _optional_json_object_span(source, variable)
+        if span is not None:
+            spans.append((variable, *span))
+    for variable, start, end in sorted(spans, key=lambda item: item[1], reverse=True):
+        source = source[:start] + f"<{variable}>" + source[end:]
+    return source
+
+
+def _optional_json_object(source: str, variable: str) -> dict[str, object] | None:
+    span = _optional_json_object_span(source, variable)
+    if span is None:
+        return None
+    try:
+        value = json.loads(source[span[0] : span[1]])
+    except json.JSONDecodeError as exc:
+        raise PublishFailedError(
+            f"Offline preloader {variable} fallback is invalid JSON."
+        ) from exc
+    if not isinstance(value, dict):
+        raise PublishFailedError(
+            f"Offline preloader {variable} fallback must contain an object."
+        )
+    return value
+
+
 def _overlay_path(source: Path, generated: Path, relative: str) -> Path:
     path = Path(*PurePosixPath(relative).parts)
     staged = generated / path
@@ -277,14 +347,12 @@ def validate_staged_diff_contract(
             raise PublishFailedError(f"Offline preloader payload is missing: '{payload_text}'.")
         source_text = TextDocument.read(source_payload).text
         generated_text = TextDocument.read(generated_payload).text
-        source_start, source_end = _inline_json_span(source_text)
-        generated_start, generated_end = _inline_json_span(generated_text)
-        if (
-            source_text[:source_start] != generated_text[:generated_start]
-            or source_text[source_end:] != generated_text[generated_end:]
+        if _normalized_preloader_wrapper(source_text) != _normalized_preloader_wrapper(
+            generated_text
         ):
             raise PublishFailedError(
-                f"Offline preloader payload '{payload_text}' changed outside its generated INLINE map."
+                f"Offline preloader payload '{payload_text}' changed outside its "
+                "generated resource maps."
             )
 
     _validate_local_references(source, generated, plan.page_hrefs)
@@ -369,7 +437,18 @@ def _validate_generated_site_overlay(
         for key, value in expected.items():
             if inline.get(key) != value:
                 raise PublishFailedError(
-                    f"Offline preloader payload '{payload_text}' has stale embedded value for '{key}'."
+                    f"Offline preloader payload '{payload_text}' has stale embedded "
+                    f"value for '{key}'."
+                )
+        expected_fallbacks = {
+            "CURRENT_CONFIG": expected["./assets/config.json"],
+            "CURRENT_VIDEOS": expected[f"./content/i18n/{language}/videos.json"],
+        }
+        for variable, value in expected_fallbacks.items():
+            fallback = _optional_json_object(payload_source, variable)
+            if fallback is not None and fallback != value:
+                raise PublishFailedError(
+                    f"Offline preloader payload '{payload_text}' has stale {variable} fallback."
                 )
         for key, value in inline.items():
             if not isinstance(key, str) or not key.endswith(".html") or not isinstance(value, str):

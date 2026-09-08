@@ -152,6 +152,17 @@ def read_offline_inline(preloader: Path) -> dict[str, object]:
     return payload
 
 
+def read_assigned_json(preloader: Path, variable: str) -> dict[str, object]:
+    source = preloader.read_text(encoding="utf-8")
+    span = publishing._optional_json_object_span(source, variable)
+    if span is None:
+        raise TypeError(f"offline preloader has no object fallback for {variable}")
+    payload = json.loads(source[span[0] : span[1]])
+    if not isinstance(payload, dict):
+        raise TypeError(f"offline preloader {variable} fallback is not an object")
+    return payload
+
+
 class PublishingTests(unittest.TestCase):
     def test_inline_scanner_handles_const_spacing_and_braces_inside_strings(self) -> None:
         source = 'const INLINE =  {"./index.html":"a } brace and \\\"quote\\\""};\nlet BASE_DIR="";'
@@ -1025,6 +1036,138 @@ class PublishingTests(unittest.TestCase):
                 {"video-1": "page_1.mp4", "video-3": "page_3.mp4"},
             )
             self.assertEqual(inline["./index.html"], updated_index)
+
+    def test_publish_refreshes_legacy_runtime_fallbacks_that_override_inline_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            config_path = book / "assets" / "config.json"
+            stale_config = json.loads(config_path.read_text(encoding="utf-8"))
+            stale_config["bundleVersion"] = "6"
+            index = book / "index.html"
+            index.write_text(
+                '<title>Test</title>'
+                '<script src="./assets/offline-preloader.js?v=7"></script>'
+                '<script src="./assets/base.bundle.local.js?v=7"></script>',
+                encoding="utf-8",
+            )
+            preloader = book / "assets" / "offline-preloader.js"
+            preloader.write_text(
+                "// generated offline resources\n"
+                "(function () {\n"
+                "  var INLINE = "
+                + json.dumps(
+                    {
+                        "./assets/config.json": stale_config,
+                        "./content/i18n/en-GB/videos.json": {
+                            "video-1": "deleted-video.mp4"
+                        },
+                        "./index.html": index.read_text(encoding="utf-8"),
+                    },
+                    separators=(",", ":"),
+                )
+                + ";\n"
+                + "  var CURRENT_CONFIG = "
+                + json.dumps(stale_config, separators=(",", ":"))
+                + ";\n"
+                + '  var CURRENT_VIDEOS = {"video-1":"deleted-video.mp4"};\n'
+                + "  var preloadedFetch = window.fetch.bind(window);\n"
+                + "  window.fetch = function (url) {\n"
+                + '    if (String(url).includes("videos.json")) return CURRENT_VIDEOS;\n'
+                + "    return preloadedFetch(url);\n"
+                + "  };\n"
+                + "})();\n",
+                encoding="utf-8",
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            current_config = json.loads(config_path.read_text(encoding="utf-8"))
+            current_videos = json.loads(
+                (book / "content" / "i18n" / "en-GB" / "videos.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                read_assigned_json(preloader, "CURRENT_CONFIG"), current_config
+            )
+            self.assertEqual(
+                read_assigned_json(preloader, "CURRENT_VIDEOS"), current_videos
+            )
+            self.assertEqual(current_videos, {"video-1": "page_1.mp4"})
+            self.assertIn(
+                "window.fetch = function (url)", preloader.read_text(encoding="utf-8")
+            )
+
+    def test_stale_legacy_runtime_fallback_is_rejected_before_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root)
+            index = book / "index.html"
+            index.write_text(
+                '<title>Test</title>'
+                '<script src="./assets/offline-preloader.js?v=7"></script>'
+                '<script src="./assets/base.bundle.local.js?v=7"></script>',
+                encoding="utf-8",
+            )
+            preloader = book / "assets" / "offline-preloader.js"
+            preloader.write_text(
+                "var INLINE = "
+                + json.dumps(
+                    {
+                        "./assets/config.json": json.loads(
+                            (book / "assets" / "config.json").read_text(encoding="utf-8")
+                        ),
+                        "./content/i18n/en-GB/videos.json": {},
+                        "./index.html": index.read_text(encoding="utf-8"),
+                    },
+                    separators=(",", ":"),
+                )
+                + ";\n"
+                + 'var CURRENT_VIDEOS = {"video-1":"deleted-video.mp4"};\n',
+                encoding="utf-8",
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+            before = hash_tree(book)
+            actual_sync = publishing._synchronize_offline_preloader
+
+            def restore_stale_fallback(*args: object, **kwargs: object) -> tuple[Path, ...]:
+                changed = actual_sync(*args, **kwargs)  # type: ignore[arg-type]
+                staged_book = args[0]
+                staged_preloader = (  # type: ignore[operator]
+                    staged_book / "assets" / "offline-preloader.js"
+                )
+                source = staged_preloader.read_text(encoding="utf-8")
+                span = publishing._optional_json_object_span(source, "CURRENT_VIDEOS")
+                if span is None:
+                    raise AssertionError("test preloader lost CURRENT_VIDEOS")
+                staged_preloader.write_text(
+                    source[: span[0]]
+                    + '{"video-1":"deleted-video.mp4"}'
+                    + source[span[1] :],
+                    encoding="utf-8",
+                )
+                return changed
+
+            with patch(
+                "adt_video_publisher.publishing._synchronize_offline_preloader",
+                side_effect=restore_stale_fallback,
+            ), patch(
+                "adt_video_publisher.publishing._commit_in_place"
+            ) as commit, self.assertRaisesRegex(
+                PublishFailedError, "stale CURRENT_VIDEOS"
+            ):
+                publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            commit.assert_not_called()
+            self.assertEqual(hash_tree(book), before)
 
     def test_publish_refreshes_external_offline_payload_and_loader_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

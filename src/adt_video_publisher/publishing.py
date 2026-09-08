@@ -949,6 +949,71 @@ def _inline_json_span(source: str) -> tuple[int, int]:
     raise PublishFailedError("Offline preloader INLINE resource map is incomplete.")
 
 
+def _optional_json_object_span(source: str, variable: str) -> tuple[int, int] | None:
+    """Return the JSON object assigned to an optional JavaScript variable."""
+
+    assignment = re.search(
+        rf"\b(?:var|let|const)\s+{re.escape(variable)}\s*=\s*",
+        source,
+    )
+    if assignment is None:
+        return None
+    start = assignment.end()
+    while start < len(source) and source[start].isspace():
+        start += 1
+    if start >= len(source) or source[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for position in range(start, len(source)):
+        character = source[position]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return start, position + 1
+            if depth < 0:
+                break
+    return None
+
+
+def _synchronize_runtime_fallbacks(
+    source: str,
+    *,
+    config: dict[str, object],
+    videos: dict[str, object],
+) -> str:
+    """Synchronize legacy runtime fallbacks that can override the INLINE map."""
+
+    replacements: list[tuple[int, int, str]] = []
+    for variable, value in (("CURRENT_CONFIG", config), ("CURRENT_VIDEOS", videos)):
+        span = _optional_json_object_span(source, variable)
+        if span is None:
+            continue
+        replacements.append(
+            (
+                span[0],
+                span[1],
+                json.dumps(value, ensure_ascii=True, separators=(",", ":")),
+            )
+        )
+    for start, end, serialized in reversed(replacements):
+        source = source[:start] + serialized + source[end:]
+    return source
+
+
 def _versioned_reference(match: re.Match[str], version: str) -> str:
     query = (match.groupdict().get("query") or "").lstrip("?")
     parts = query.split("&") if query else []
@@ -1084,13 +1149,19 @@ def _synchronize_offline_preloader(
         else:
             inline = copy.deepcopy(inline)
 
-        inline["./assets/config.json"] = _read_json(
+        current_config = _read_json(
             book / "assets" / "config.json", "assets/config.json"
         )
-        inline[f"./content/i18n/{language}/videos.json"] = _read_json(
+        current_videos = _read_json(
             book / "content" / "i18n" / language / "videos.json",
             f"{language}/videos.json",
         )
+        if not isinstance(current_config, dict) or not isinstance(current_videos, dict):
+            raise PublishFailedError(
+                "Offline runtime configuration and video mappings must be objects."
+            )
+        inline["./assets/config.json"] = current_config
+        inline[f"./content/i18n/{language}/videos.json"] = current_videos
         for key in tuple(inline):
             if not isinstance(key, str):
                 continue
@@ -1110,6 +1181,11 @@ def _synchronize_offline_preloader(
 
         serialized = json.dumps(inline, ensure_ascii=True, separators=(",", ":"))
         updated = source[:payload_start] + serialized + source[payload_end:]
+        updated = _synchronize_runtime_fallbacks(
+            updated,
+            config=current_config,
+            videos=current_videos,
+        )
         if updated != source:
             payload_path = book / Path(*_safe_archive_path(payload_text).parts)
             payload_path.write_bytes(document.encode(updated))
