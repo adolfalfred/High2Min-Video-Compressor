@@ -44,7 +44,11 @@ from .media import probe_media
 from .page_identity import replace_page_section_index
 from .planning import DEFAULT_MAXIMUM_BYTES
 from .resources import format_megabytes
-from .video_references import parse_video_reference, versioned_video_reference
+from .video_references import (
+    parse_video_reference,
+    resolve_book_video_reference,
+    versioned_video_reference,
+)
 
 ProgressCallback = Callable[[str, str, dict[str, object]], None]
 IMS_NAMESPACE: Final = "http://www.imsproject.org/xsd/imscp_rootv1p1p2"
@@ -688,8 +692,8 @@ def _update_in_place_manifest(
     page_hrefs: tuple[str, ...],
     offline_resource_files: tuple[str, ...],
     active_offline_preloaders: tuple[str, ...],
+    removals: tuple[str, ...],
 ) -> tuple[str, ...]:
-    prefix = f"content/i18n/{language}/video/".casefold()
     mappings_path = stage / "content" / "i18n" / language / "videos.json"
     mappings = _read_json(mappings_path, f"staged {language}/videos.json")
     if not isinstance(mappings, dict) or any(
@@ -700,21 +704,23 @@ def _update_in_place_manifest(
     mapped_video_files: set[str] = set()
     for key, reference in mappings.items():
         try:
-            filename = parse_video_reference(reference).filename
+            resolved = resolve_book_video_reference(
+                reference,
+                book=source,
+                language=language,
+            )
         except ValueError as exc:
             raise PublishFailedError(
                 f"Staged videos.json contains an unsafe filename for '{key}'."
             ) from exc
-        mapped_video_files.add(f"content/i18n/{language}/video/{filename}")
+        mapped_video_files.add(resolved.root_relative)
     mapped_video_keys = {relative.casefold() for relative in mapped_video_files}
+    removal_keys = {relative.casefold() for relative in removals}
     files = {
         relative
         for relative in declared
         if _overlay_file(source, stage, relative).is_file()
-        and (
-            not relative.casefold().startswith(prefix)
-            or relative.casefold() in mapped_video_keys
-        )
+        and relative.casefold() not in removal_keys
     }
     files.update(page_hrefs)
     files.update(offline_resource_files)
@@ -769,46 +775,64 @@ def _validate_staged_in_place(
     mappings = _read_json(videos_path, f"staged {language}/videos.json")
     if not isinstance(mappings, dict):
         raise PublishFailedError("Staged videos.json must contain an object.")
-    video_root = videos_path.parent / "video"
     expected_files: set[str] = set()
     for key, reference in mappings.items():
         match = re.fullmatch(r"video-(0|[1-9][0-9]*)", str(key))
         if not match or int(match.group(1)) > page_count:
             raise PublishFailedError(f"Staged videos.json contains an invalid key: '{key}'.")
         try:
-            filename = parse_video_reference(reference).filename
+            resolved = resolve_book_video_reference(
+                reference,
+                book=source,
+                language=language,
+            )
         except ValueError as exc:
             raise PublishFailedError(
                 f"Staged videos.json contains an unsafe filename for '{key}'."
             ) from exc
-        staged_video = video_root / filename
-        source_video = source / "content" / "i18n" / language / "video" / filename
+        relative = Path(*PurePosixPath(resolved.root_relative).parts)
+        staged_video = stage / relative
+        source_video = source / relative
         exists = staged_video.is_file() or (mode == "merge" and source_video.is_file())
         if not exists:
-            raise PublishFailedError(f"Staged mapping '{key}' must point to an existing '{filename}'.")
-        if filename.casefold() in expected_files:
-            raise PublishFailedError(f"Staged videos.json maps a file more than once: '{filename}'.")
-        expected_files.add(filename.casefold())
-    actual_files = {path.name.casefold() for path in video_root.glob("*.mp4") if path.is_file()}
-    if mode == "merge":
-        source_video_root = source / "content" / "i18n" / language / "video"
-        removed_files = {
-            PurePosixPath(relative).name.casefold()
-            for relative in removals
-            if relative.casefold().startswith(
-                f"content/i18n/{language}/video/".casefold()
+            raise PublishFailedError(
+                f"Staged mapping '{key}' must point to an existing "
+                f"'{resolved.filename}'."
             )
-        }
-        actual_files.update(
-            path.name.casefold()
-            for path in source_video_root.glob("*.mp4")
-            if path.is_file() and path.name.casefold() not in removed_files
+        normalized = resolved.root_relative.casefold()
+        if normalized in expected_files:
+            raise PublishFailedError(
+                "Staged videos.json maps a file more than once: "
+                f"'{resolved.root_relative}'."
+            )
+        expected_files.add(normalized)
+    canonical_root = stage / "content" / "i18n" / language / "video"
+    canonical_prefix = f"content/i18n/{language}/video/".casefold()
+    expected_canonical = {
+        relative
+        for relative in expected_files
+        if relative.startswith(canonical_prefix)
+    }
+    actual_canonical = {
+        (canonical_root / path.name).relative_to(stage).as_posix().casefold()
+        for path in canonical_root.glob("*.mp4")
+        if path.is_file()
+    }
+    if mode == "merge":
+        source_canonical = source / "content" / "i18n" / language / "video"
+        removed = {relative.casefold() for relative in removals}
+        actual_canonical.update(
+            path.relative_to(source).as_posix().casefold()
+            for path in source_canonical.glob("*.mp4")
+            if path.is_file()
+            and path.relative_to(source).as_posix().casefold() not in removed
         )
-    if (
-        not expected_files.issubset(actual_files)
-        or (mode != "merge" and actual_files != expected_files)
+    if not expected_canonical.issubset(actual_canonical) or (
+        mode != "merge" and actual_canonical != expected_canonical
     ):
-        raise PublishFailedError("The staged video directory and videos.json do not match exactly.")
+        raise PublishFailedError(
+            "The staged video directory and videos.json do not match exactly."
+        )
     declared = declared_manifest_files(stage / "imsmanifest.xml")
     missing = [relative for relative in declared if not _overlay_file(source, stage, relative).is_file()]
     if missing:
@@ -1219,31 +1243,49 @@ def validate_adt_website(
     mappings = _read_json(videos_path, f"{selected_language}/videos.json")
     if not isinstance(mappings, dict):
         raise PublishFailedError("videos.json must contain an object.")
-    video_root = videos_path.parent / "video"
     mapped_files: set[str] = set()
     for key, reference in mappings.items():
         match = re.fullmatch(r"video-(0|[1-9][0-9]*)", str(key))
         if not match or int(match.group(1)) > page_count:
             raise PublishFailedError(f"videos.json contains an invalid key: '{key}'.")
         try:
-            filename = parse_video_reference(reference).filename
+            resolved = resolve_book_video_reference(
+                reference,
+                book=root,
+                language=selected_language,
+            )
         except ValueError as exc:
             raise PublishFailedError(
                 f"videos.json contains an unsafe filename for '{key}'."
             ) from exc
-        if filename.casefold() in mapped_files:
-            raise PublishFailedError(f"videos.json maps a file more than once: '{filename}'.")
-        mapped_files.add(filename.casefold())
-        if not (video_root / filename).is_file():
-            raise PublishFailedError(f"Mapped video is missing: '{filename}'.")
-    actual_videos = {
-        path.name.casefold() for path in video_root.glob("*.mp4") if path.is_file()
-    } if video_root.is_dir() else set()
-    if (
-        not mapped_files.issubset(actual_videos)
-        or (not allow_unmanifested and actual_videos != mapped_files)
+        normalized = resolved.root_relative.casefold()
+        if normalized in mapped_files:
+            raise PublishFailedError(
+                "videos.json maps a file more than once: "
+                f"'{resolved.root_relative}'."
+            )
+        mapped_files.add(normalized)
+        relative = Path(*PurePosixPath(resolved.root_relative).parts)
+        if not (root / relative).is_file():
+            raise PublishFailedError(
+                f"Mapped video is missing: '{resolved.root_relative}'."
+            )
+    canonical_root = root / "content" / "i18n" / selected_language / "video"
+    canonical_prefix = f"content/i18n/{selected_language}/video/".casefold()
+    mapped_canonical = {
+        relative for relative in mapped_files if relative.startswith(canonical_prefix)
+    }
+    actual_canonical = {
+        path.relative_to(root).as_posix().casefold()
+        for path in canonical_root.glob("*.mp4")
+        if path.is_file()
+    }
+    if not mapped_canonical.issubset(actual_canonical) or (
+        not allow_unmanifested and actual_canonical != mapped_canonical
     ):
-        raise PublishFailedError("The published video directory and videos.json do not match exactly.")
+        raise PublishFailedError(
+            "The published video directory and videos.json do not match exactly."
+        )
     declared = declared_manifest_files(root / "imsmanifest.xml")
     missing = sorted(
         relative
@@ -1857,7 +1899,11 @@ def publish_adt(
         inherit_video_cache_version = False
         for reference in publication_plan.existing_mappings.values():
             try:
-                if parse_video_reference(reference).has_cache_version:
+                if resolve_book_video_reference(
+                    reference,
+                    book=source_book,
+                    language=selected_language,
+                ).has_cache_version:
                     inherit_video_cache_version = True
                     break
             except ValueError:
@@ -1907,6 +1953,7 @@ def publish_adt(
                 page_hrefs=publication_plan.page_hrefs,
                 offline_resource_files=publication_plan.offline_resource_files,
                 active_offline_preloaders=publication_plan.active_offline_preloaders,
+                removals=publication_plan.removals,
             )
             validation = _validate_staged_in_place(
                 source_book,

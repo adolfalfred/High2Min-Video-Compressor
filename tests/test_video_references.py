@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from adt_video_publisher.video_references import (
     parse_video_reference,
+    resolve_book_video_reference,
     versioned_video_reference,
 )
 
@@ -51,6 +54,25 @@ class VideoReferenceTests(unittest.TestCase):
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_video_reference(value)
+
+    def test_book_resolver_accepts_legacy_paths_only_when_they_stay_in_book(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            book = Path(temporary)
+            resolved = resolve_book_video_reference(
+                "../../../../Videos_web/page_1.mp4?v=17",
+                book=book,
+                language="en",
+            )
+
+            self.assertEqual(resolved.filename, "page_1.mp4")
+            self.assertEqual(resolved.root_relative, "Videos_web/page_1.mp4")
+            self.assertTrue(resolved.has_cache_version)
+            with self.assertRaises(ValueError):
+                resolve_book_video_reference(
+                    "../../../../../outside/page_1.mp4",
+                    book=book,
+                    language="en",
+                )
 
 
 if __name__ == "__main__":

@@ -170,6 +170,8 @@ jobs:
 
           Merge publishing preserves untouched videos that use legacy filenames such as `sl_pg001_sec001.mp4`. Selected replacement pages are published with canonical `page_N.mp4` names, and only the superseded files for those pages are removed.
 
+          Existing mappings may also resolve through legacy directories such as `../../../../Videos_web/page_1.mp4` when the final file remains inside the selected ADT repository. Merge mode preserves untouched paths and moves only targeted replacements to the canonical language video directory.
+
           Browser cache-busted mappings such as `page_1.mp4?v=17` are supported safely. High2Min preserves untouched references, advances replacement cache versions, and uses only the physical MP4 filename for filesystem and manifest operations.
 
           Cover video publishing accepts page zero for the front cover and assigns a unique runtime key to a later unnumbered back cover. Git-tracked historical spines allow old source video numbers to follow stable page hrefs after page joins, with an explicit warning when a former section now maps to a combined page.

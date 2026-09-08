@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlsplit
 
 
@@ -29,9 +30,26 @@ class VideoReference:
         )
 
 
-def parse_video_reference(value: object) -> VideoReference:
-    """Parse one safe local MP4 URL reference without treating its query as a filename."""
+@dataclass(frozen=True, slots=True)
+class BookVideoReference:
+    """An existing browser mapping resolved to a file inside an ADT book."""
 
+    value: str
+    filename: str
+    root_relative: str
+    query: str
+    fragment: str
+
+    @property
+    def has_cache_version(self) -> bool:
+        return any(
+            unquote(part.partition("=")[0]).casefold() == "v"
+            for part in self.query.split("&")
+            if part
+        )
+
+
+def _video_reference_parts(value: object) -> tuple[str, str, str, str]:
     if not isinstance(value, str) or not value or value != value.strip():
         raise ValueError("video reference must be a non-empty trimmed string")
     if "\\" in value or any(ord(character) < 32 or ord(character) == 127 for character in value):
@@ -45,24 +63,70 @@ def parse_video_reference(value: object) -> VideoReference:
     if parts.scheme or parts.netloc:
         raise ValueError("video reference must be local")
     decoded_path = unquote(parts.path)
-    path = PurePosixPath(decoded_path)
     if (
         not decoded_path
-        or path.is_absolute()
-        or path.name != decoded_path
-        or any(part in {"", ".", ".."} for part in path.parts)
+        or PurePosixPath(decoded_path).is_absolute()
         or any(ord(character) < 32 or ord(character) == 127 for character in decoded_path)
         or any(character in '<>:"|?*' for character in decoded_path)
-        or "/" in decoded_path
         or "\\" in decoded_path
-        or path.suffix.casefold() != ".mp4"
+        or PurePosixPath(decoded_path).suffix.casefold() != ".mp4"
+    ):
+        raise ValueError("video reference must resolve to a local MP4 file")
+    return value, decoded_path, parts.query, parts.fragment
+
+
+def parse_video_reference(value: object) -> VideoReference:
+    """Parse one safe local MP4 filename without treating its query as a filename."""
+
+    original, decoded_path, query, fragment = _video_reference_parts(value)
+    path = PurePosixPath(decoded_path)
+    if (
+        path.name != decoded_path
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or "/" in decoded_path
     ):
         raise ValueError("video reference must resolve to one local MP4 filename")
     return VideoReference(
-        value=value,
+        value=original,
         filename=decoded_path,
-        query=parts.query,
-        fragment=parts.fragment,
+        query=query,
+        fragment=fragment,
+    )
+
+
+def resolve_book_video_reference(
+    value: object,
+    *,
+    book: Path,
+    language: str,
+) -> BookVideoReference:
+    """Resolve an existing ADT mapping while confining it to the selected book."""
+
+    original, decoded_path, query, fragment = _video_reference_parts(value)
+    language_path = PurePosixPath(language)
+    if (
+        language_path.is_absolute()
+        or len(language_path.parts) != 1
+        or language_path.name in {"", ".", ".."}
+    ):
+        raise ValueError("language must be one safe directory name")
+    base = PurePosixPath("content", "i18n", language, "video")
+    normalized_text = posixpath.normpath(f"{base.as_posix()}/{decoded_path}")
+    normalized = PurePosixPath(normalized_text)
+    if normalized.is_absolute() or not normalized.parts or normalized.parts[0] == "..":
+        raise ValueError("video reference escapes the selected ADT book")
+    root = book.resolve()
+    candidate = (root / Path(*normalized.parts)).resolve(strict=False)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("video reference escapes the selected ADT book") from exc
+    return BookVideoReference(
+        value=original,
+        filename=PurePosixPath(decoded_path).name,
+        root_relative=normalized.as_posix(),
+        query=query,
+        fragment=fragment,
     )
 
 
@@ -76,7 +140,16 @@ def versioned_video_reference(
     """Build a replacement mapping while preserving its authored URL suffix semantics."""
 
     canonical = parse_video_reference(filename)
-    existing = parse_video_reference(existing_reference) if existing_reference is not None else None
+    if existing_reference is None:
+        existing = None
+    else:
+        original, decoded_path, query, fragment = _video_reference_parts(existing_reference)
+        existing = VideoReference(
+            value=original,
+            filename=PurePosixPath(decoded_path).name,
+            query=query,
+            fragment=fragment,
+        )
     query_parts = existing.query.split("&") if existing and existing.query else []
     should_version = inherit_cache_version or bool(existing and existing.has_cache_version)
     replaced = False

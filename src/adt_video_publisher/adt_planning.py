@@ -17,7 +17,7 @@ from typing import Final
 from .errors import InvalidInputError, PublishFailedError
 from .page_identity import page_section_index
 from .processes import hidden_process_options
-from .video_references import parse_video_reference
+from .video_references import BookVideoReference, resolve_book_video_reference
 
 IMS_NAMESPACE: Final = "http://www.imsproject.org/xsd/imscp_rootv1p1p2"
 NUMBER_GROUP_PATTERN: Final = re.compile(r"[0-9]+")
@@ -874,10 +874,14 @@ def analyze_adt_publish(
     retained_mappings.update(desired)
     mapping_blockers: list[str] = []
     retained_video_sources: set[str] = set()
-    parsed_existing_filenames: dict[str, str] = {}
+    parsed_existing_references: dict[str, BookVideoReference] = {}
     for key, reference in existing.items():
         try:
-            parsed_existing_filenames[key] = parse_video_reference(reference).filename
+            parsed_existing_references[key] = resolve_book_video_reference(
+                reference,
+                book=root,
+                language=selected,
+            )
         except ValueError:
             pass
     for key, reference in retained_mappings.items():
@@ -886,7 +890,11 @@ def analyze_adt_publish(
             mapping_blockers.append(f"Existing videos.json contains an invalid key: '{key}'.")
             continue
         try:
-            filename = parse_video_reference(reference).filename
+            resolved = resolve_book_video_reference(
+                reference,
+                book=root,
+                language=selected,
+            )
         except ValueError:
             mapping_blockers.append(
                 f"Existing videos.json contains an unsafe filename for '{key}'."
@@ -894,10 +902,12 @@ def analyze_adt_publish(
             continue
         if key in desired:
             continue
-        relative = f"content/i18n/{selected}/video/{filename}"
+        relative = resolved.root_relative
         retained_video_sources.add(relative)
         if not (root / Path(*PurePosixPath(relative).parts)).is_file():
-            mapping_blockers.append(f"Existing mapped video is missing: '{filename}'.")
+            mapping_blockers.append(
+                f"Existing mapped video is missing: '{resolved.filename}'."
+            )
     manifest = _manifest_files(root)
     runtime, helper_locations = _active_assets(root, hrefs)
     blockers: list[str] = list(mapping_blockers)
@@ -1064,17 +1074,21 @@ def analyze_adt_publish(
 
     removals: list[str] = []
     for item in planned:
-        existing_filename = parsed_existing_filenames.get(item.mapping_key)
+        existing_reference = parsed_existing_references.get(item.mapping_key)
+        destination_relative = (
+            f"content/i18n/{selected}/video/{item.destination_filename}"
+        )
         if (
-            existing_filename is not None
-            and existing_filename.casefold() != item.destination_filename.casefold()
+            existing_reference is not None
+            and existing_reference.root_relative.casefold()
+            != destination_relative.casefold()
         ):
-            removals.append(f"content/i18n/{selected}/video/{existing_filename}")
+            removals.append(existing_reference.root_relative)
     if mode == "replace":
         for key in existing:
-            filename = parsed_existing_filenames.get(key)
-            if key not in desired and filename is not None:
-                removals.append(f"content/i18n/{selected}/video/{filename}")
+            existing_reference = parsed_existing_references.get(key)
+            if key not in desired and existing_reference is not None:
+                removals.append(existing_reference.root_relative)
     for item in planned:
         mutations.add(f"content/i18n/{selected}/video/{item.destination_filename}")
     zip_sentinels = {

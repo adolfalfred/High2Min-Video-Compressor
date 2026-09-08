@@ -461,6 +461,71 @@ class PublishingTests(unittest.TestCase):
                 2,
             )
 
+    def test_merge_preserves_safe_legacy_video_directory_inside_book(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root, existing_video=True)
+            language = book / "content" / "i18n" / "en-GB"
+            canonical_video = language / "video" / "page_2.mp4"
+            legacy_video = book / "Videos_web" / "page_2.mp4"
+            legacy_video.parent.mkdir()
+            canonical_video.replace(legacy_video)
+            (language / "videos.json").write_text(
+                json.dumps(
+                    {"video-2": "../../../../Videos_web/page_2.mp4?v=7"}
+                ),
+                encoding="utf-8",
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_1.mp4").write_bytes(b"replacement")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            mappings = json.loads(
+                (language / "videos.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(mappings["video-1"], "page_1.mp4?v=8")
+            self.assertEqual(
+                mappings["video-2"],
+                "../../../../Videos_web/page_2.mp4?v=7",
+            )
+            self.assertTrue(legacy_video.is_file())
+            declared = declared_manifest_files(book / "imsmanifest.xml")
+            self.assertIn("Videos_web/page_2.mp4", declared)
+            self.assertIn("content/i18n/en-GB/video/page_1.mp4", declared)
+
+    def test_merge_replaces_only_targeted_legacy_directory_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            book = make_book(root, existing_video=True)
+            language = book / "content" / "i18n" / "en-GB"
+            canonical_video = language / "video" / "page_2.mp4"
+            legacy_video = book / "Videos_web" / "page_2.mp4"
+            legacy_video.parent.mkdir()
+            canonical_video.replace(legacy_video)
+            (language / "videos.json").write_text(
+                json.dumps({"video-2": "../../../../Videos_web/page_2.mp4"}),
+                encoding="utf-8",
+            )
+            write_manifest(book)
+            videos = root / "compressed"
+            videos.mkdir()
+            (videos / "page_2.mp4").write_bytes(b"replacement-two")
+
+            publish_adt(videos, book=book, in_place=True, validate_media=False)
+
+            mappings = json.loads(
+                (language / "videos.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(mappings, {"video-2": "page_2.mp4"})
+            self.assertFalse(legacy_video.exists())
+            self.assertTrue(canonical_video.is_file())
+            declared = declared_manifest_files(book / "imsmanifest.xml")
+            self.assertNotIn("Videos_web/page_2.mp4", declared)
+            self.assertIn("content/i18n/en-GB/video/page_2.mp4", declared)
+
     def test_merge_mode_removes_superseded_legacy_filename(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

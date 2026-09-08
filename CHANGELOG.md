@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.9 - 2026-09-08
+
+- Support existing ADT video mappings that resolve through legacy in-book directories such as `../../../../Videos_web/page_1.mp4`.
+- Resolve legacy references from the runtime video directory and require their final paths to remain inside the selected ADT repository.
+- Preserve untouched legacy mappings and files in merge mode while migrating only a targeted replacement to the canonical language video directory.
+- Recover exact manifest declarations for retained legacy videos and remove only declarations for superseded files.
+- Continue rejecting external URLs, absolute paths, escaping traversal, symlinks that resolve outside the book, malformed references, and non-MP4 mappings.
+- Add regression coverage modeled on the English Standard 4 repository.
+
 ## 0.11.8 - 2026-09-08
 
 - Synchronize legacy `CURRENT_CONFIG` and `CURRENT_VIDEOS` preloader fallbacks with the refreshed configuration and sign-video mappings.
